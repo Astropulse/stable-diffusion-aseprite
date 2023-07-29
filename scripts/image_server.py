@@ -38,11 +38,11 @@ from websockets import serve, connect
 from io import BytesIO
 
 # Import console management libraries
+from rich import print as rprint
 try:
     import pygetwindow as gw
 except:
     rprint(f"[#ab333d]Pygetwindow could not be loaded. This will limit some cosmetic functionality.")
-from rich import print as rprint
 from colorama import just_fix_windows_console
 
 # Fix windows console for color codes
