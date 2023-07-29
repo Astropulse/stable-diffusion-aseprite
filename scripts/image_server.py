@@ -39,10 +39,12 @@ from io import BytesIO
 
 # Import console management libraries
 from rich import print as rprint
-try:
-    import pygetwindow as gw
-except:
-    rprint(f"[#ab333d]Pygetwindow could not be loaded. This will limit some cosmetic functionality.")
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    try:
+        import pygetwindow as gw
+    except:
+        rprint(f"[#ab333d]Pygetwindow could not be loaded. This will limit some cosmetic functionality.")
 from colorama import just_fix_windows_console
 
 # Fix windows console for color codes
