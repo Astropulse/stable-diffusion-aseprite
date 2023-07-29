@@ -38,7 +38,10 @@ from websockets import serve, connect
 from io import BytesIO
 
 # Import console management libraries
-import pygetwindow as gw
+try:
+    import pygetwindow as gw
+except:
+    rprint(f"[#ab333d]Pygetwindow could not be loaded. This will limit some cosmetic functionality.")
 from rich import print as rprint
 from colorama import just_fix_windows_console
 
@@ -1240,20 +1243,23 @@ async def server(websocket):
 
         elif re.search(r"connected.+", message):
             background = searchString(message, "dbackground", "end")[0]
-            rd = gw.getWindowsWithTitle("Retro Diffusion Image Generator")[0]
-            if background == "false":
-                try:
-                    # Restore and activate the window
-                    rd.restore()
-                    rd.activate()
-                except:
-                    pass
-            else:
-                try:
-                    # Minimize the window
-                    rd.minimize()
-                except:
-                    pass
+            try:
+                rd = gw.getWindowsWithTitle("Retro Diffusion Image Generator")[0]
+                if background == "false":
+                    try:
+                        # Restore and activate the window
+                        rd.restore()
+                        rd.activate()
+                    except:
+                        pass
+                else:
+                    try:
+                        # Minimize the window
+                        rd.minimize()
+                    except:
+                        pass
+            except:
+                pass
             await websocket.send("connected")
         elif message == "no model":
             await websocket.send("loaded model")
