@@ -413,7 +413,6 @@ def load_model(modelpath, modelfile, config, device, precision, optimized):
 
     # Load the model configuration
     config = OmegaConf.load(f"{config}")
-    ldm_config = OmegaConf.load(f"configs/stable-diffusion/v1-inference.yaml")
 
     global modelPV
     # Ignore an annoying userwaring
