@@ -61,7 +61,6 @@ log.propagate = False
 log.setLevel(pylog.ERROR)
 logging.set_verbosity_error()
 
-global sd_model
 global model
 global modelCS
 global modelFS
@@ -425,10 +424,8 @@ def load_model(modelpath, modelfile, config, device, precision, optimized):
 
     # Instantiate and load the main model
     global model
-    global sd_model
     
     model = instantiate_from_config(config.modelUNet)
-    sd_model = instantiate_from_config(ldm_config.model)
     
     _, _ = model.load_state_dict(sd, strict=False)
     model.eval()

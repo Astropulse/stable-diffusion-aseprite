@@ -120,7 +120,7 @@ def assign_lora_names_to_compvis_modules(model, modelCS):
     print("Assigning Lora names to CompVis modules...")
     
     if not hasattr(modelCS, 'cond_stage_model'):
-        print("No cond_stage_model found in sd_model, skipping Lora")
+        print("No cond_stage_model found in modelCS, skipping Lora")
         return
     
     lora_layer_mapping = {}
