@@ -143,8 +143,8 @@ def assign_lora_names_to_compvis_modules(model, modelCS):
     model.lora_layer_mapping = lora_layer_mapping
 
 
-def load_lora(name, filename, lora_tensors, model):
-    lora = LoraModule(name)
+def load_lora(filename, lora_tensors, model):
+    lora = LoraModule(filename)
     lora.mtime = os.path.getmtime(filename)
 
     sd = get_state_dict_from_checkpoint(lora_tensors)
@@ -203,8 +203,6 @@ def load_lora(name, filename, lora_tensors, model):
 
     if len(keys_failed_to_match) > 0:
         print(f"Failed to match keys when loading Lora {filename}: {keys_failed_to_match}")
-        
-    loaded_loras.append(lora)
 
     return lora
 
@@ -341,6 +339,12 @@ def lora_MultiheadAttention_load_state_dict(self, *args, **kwargs):
 
 def unload():
     pass
+
+def register_lora_for_inference(lora):
+    loaded_loras.append(lora)
+    
+def remove_lora_for_inference(lora):
+    loaded_loras.remove(lora)
 
 def apply_lora():
     print('applying lora')

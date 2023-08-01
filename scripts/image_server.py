@@ -40,7 +40,7 @@ from io import BytesIO
 # Import console management libraries
 from rich import print as rprint
 
-from scripts.lora.lora import apply_lora, assign_lora_names_to_compvis_modules, load_lora
+from scripts.lora.lora import apply_lora, assign_lora_names_to_compvis_modules, load_lora, register_lora_for_inference, remove_lora_for_inference
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     try:
@@ -451,6 +451,9 @@ def load_model(modelpath, modelfile, config, device, precision, optimized):
         model.half()
         modelCS.half()
         precision = "half"
+        
+    # Lora setup
+    assign_lora_names_to_compvis_modules(model, modelCS)
     
     # Print loading information
     rprint(f"[#c4f129]Loaded model to [#48a971]{model.cdevice}[#c4f129] at [#48a971]{precision} precision[#c4f129] in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
@@ -884,10 +887,11 @@ def txt2img(pixel, device, precision, prompt, negative, W, H, ddim_steps, scale,
     else:
         precision_scope = nullcontext
         
-    assign_lora_names_to_compvis_modules(model, modelCS)
-    lora_filename = "lora.safetensors"
+    lora_filename = "../lora.safetensors"
     lora_tensors = load_file(lora_filename)
-    load_lora("Lora Test", lora_filename, lora_tensors, model)
+    lora = load_lora(lora_filename, lora_tensors, model)
+    lora.multiplier = 0.5
+    register_lora_for_inference(lora)
     apply_lora()
 
     seeds = []
@@ -988,6 +992,11 @@ def txt2img(pixel, device, precision, prompt, negative, W, H, ddim_steps, scale,
                     
                     # Delete the samples to free up memory
                     del samples_ddim
+                    
+                    # Release lora
+                    remove_lora_for_inference(lora)
+                    del lora
+                    
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
 
 def img2img(pixel, device, precision, prompt, negative, W, H, ddim_steps, scale, strength, seed, n_iter, tilingX, tilingY, pixelvae):
