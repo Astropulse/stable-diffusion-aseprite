@@ -14,7 +14,6 @@ dependencies:
   - numpy=1.23.5
   - curl
   - pip:
-    - antlr4-python3-runtime
     - cryptography
     - pygetwindow==0.0.9
     - colorama==0.4.6
