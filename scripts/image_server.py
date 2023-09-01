@@ -962,21 +962,39 @@ def txt2img(loraPath, loraFiles, loraWeights, device, precision, pixelSize, prom
     else:
         precision_scope = nullcontext
 
+    # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
     loras = []
+    decryptedFiles = []
     fernet = Fernet("I47jl1hqUPug4KbVYd60_zeXhn_IH_ECT3QRGiBxdxo=")
     for i, loraFile in enumerate(loraFiles):
+        decryptedFiles[i] = "none"
         if loraFile != "none":
             lora_filename = os.path.join(loraPath, loraFile)
             if os.path.splitext(loraFile)[1] == ".pxlm":
                 with open(lora_filename, 'rb') as enc_file:
                     encrypted = enc_file.read()
-                try:
-                    decrypted = fernet.decrypt(encrypted)
-                except:
-                    decrypted = encrypted
-                with open(lora_filename, 'wb') as dec_file:
-                    dec_file.write(decrypted)
-            loras.append(load_lora(lora_filename, model))
+                    try:
+                        # Assume file is encrypted, decrypt it
+                        decryptedFiles[i] = fernet.decrypt(encrypted)
+                    except:
+                        # Decryption failed, assume not encrypted
+                        decryptedFiles[i] = encrypted
+
+                    with open(lora_filename, 'wb') as dec_file:
+                        # Write attempted decrypted file
+                        dec_file.write(decryptedFiles[i])
+                        try:
+                            # Load decrypted file
+                            loras.append(load_lora(lora_filename, model))
+                        except:
+                            # Decrypted file could not be read, revert to unchanged, and return an error
+                            decryptedFiles[i] = "none"
+                            dec_file.write(encrypted)
+                            loras.append(None)
+                            rprint(f"[#ab333d]Modifier {os.path.splitext(loraFile)[0]} could not be loaded, the file may be corrupted")
+                            continue
+            else:
+                loras.append(load_lora(lora_filename, model))
             loras[i].multiplier = loraWeights[i]/100
             register_lora_for_inference(loras[i])
             apply_lora()
@@ -1089,11 +1107,10 @@ def txt2img(loraPath, loraFiles, loraWeights, device, precision, pixelSize, prom
                 # Release lora
                 remove_lora_for_inference(lora)
             if os.path.splitext(loraFiles[i])[1] == ".pxlm":
-                with open(os.path.join(loraPath, loraFiles[i]), 'rb') as enc_file:
-                    decrypted = enc_file.read()
-                encrypted = fernet.encrypt(decrypted)
-                with open(os.path.join(loraPath, loraFiles[i]), 'wb') as dec_file:
-                    dec_file.write(encrypted)
+                if decryptedFiles[i] != "none":
+                    encrypted = fernet.encrypt(decryptedFiles[i])
+                    with open(os.path.join(loraPath, loraFiles[i]), 'wb') as dec_file:
+                        dec_file.write(encrypted)
         del loras
 
         if post == "true":
@@ -1159,21 +1176,39 @@ def img2img(loraPath, loraFiles, loraWeights, device, precision, pixelSize, prom
     else:
         precision_scope = nullcontext
 
+    # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
     loras = []
+    decryptedFiles = []
     fernet = Fernet("I47jl1hqUPug4KbVYd60_zeXhn_IH_ECT3QRGiBxdxo=")
     for i, loraFile in enumerate(loraFiles):
+        decryptedFiles[i] = "none"
         if loraFile != "none":
             lora_filename = os.path.join(loraPath, loraFile)
             if os.path.splitext(loraFile)[1] == ".pxlm":
                 with open(lora_filename, 'rb') as enc_file:
                     encrypted = enc_file.read()
-                try:
-                    decrypted = fernet.decrypt(encrypted)
-                except:
-                    decrypted = encrypted
-                with open(lora_filename, 'wb') as dec_file:
-                    dec_file.write(decrypted)
-            loras.append(load_lora(lora_filename, model))
+                    try:
+                        # Assume file is encrypted, decrypt it
+                        decryptedFiles[i] = fernet.decrypt(encrypted)
+                    except:
+                        # Decryption failed, assume not encrypted
+                        decryptedFiles[i] = encrypted
+
+                    with open(lora_filename, 'wb') as dec_file:
+                        # Write attempted decrypted file
+                        dec_file.write(decryptedFiles[i])
+                        try:
+                            # Load decrypted file
+                            loras.append(load_lora(lora_filename, model))
+                        except:
+                            # Decrypted file could not be read, revert to unchanged, and return an error
+                            decryptedFiles[i] = "none"
+                            dec_file.write(encrypted)
+                            loras.append(None)
+                            rprint(f"[#ab333d]Modifier {os.path.splitext(loraFile)[0]} could not be loaded, the file may be corrupted")
+                            continue
+            else:
+                loras.append(load_lora(lora_filename, model))
             loras[i].multiplier = loraWeights[i]/100
             register_lora_for_inference(loras[i])
             apply_lora()
@@ -1294,11 +1329,10 @@ def img2img(loraPath, loraFiles, loraWeights, device, precision, pixelSize, prom
                 # Release lora
                 remove_lora_for_inference(lora)
             if os.path.splitext(loraFiles[i])[1] == ".pxlm":
-                with open(os.path.join(loraPath, loraFiles[i]), 'rb') as enc_file:
-                    decrypted = enc_file.read()
-                encrypted = fernet.encrypt(decrypted)
-                with open(os.path.join(loraPath, loraFiles[i]), 'wb') as dec_file:
-                    dec_file.write(encrypted)
+                if decryptedFiles[i] != "none":
+                    encrypted = fernet.encrypt(decryptedFiles[i])
+                    with open(os.path.join(loraPath, loraFiles[i]), 'wb') as dec_file:
+                        dec_file.write(encrypted)
         del loras
 
         if post == "true":
