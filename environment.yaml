@@ -37,6 +37,7 @@ dependencies:
     - torchmetrics==0.7.0
     - safetensors==0.3.2
     - kornia==0.6
+    - scipy==1.9.3
     - accelerate==0.12.0
     - -e git+https://github.com/Astropulse/hitherdither#egg=hitherdither
     - -e git+https://github.com/CompVis/taming-transformers#egg=taming-transformers
