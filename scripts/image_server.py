@@ -481,7 +481,8 @@ def load_model(modelpath, modelfile, config, device, precision, optimized):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         # Load the pixelvae
-        modelPV = load_pixelvae_model(f"models/decoder/decoder.px", device, "eVWtlIBjTRr0-gyZB0smWSwxCiF8l4PVJcNJOIFLFqE=")
+        decoder_path = os.path.abspath("models/decoder/decoder.px")
+        modelPV = load_pixelvae_model(decoder_path, device, "eVWtlIBjTRr0-gyZB0smWSwxCiF8l4PVJcNJOIFLFqE=")
 
     # Instantiate and load the main model
     global model
