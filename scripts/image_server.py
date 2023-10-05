@@ -28,6 +28,10 @@ from torch import autocast
 from torch import Tensor
 from torch.nn import functional as F
 from torch.nn.modules.utils import _pair
+try:
+    from torch import mps
+except:
+    pass
 
 # Import logging libraries
 import traceback, warnings
