@@ -1854,7 +1854,7 @@ async def server(websocket):
                 # Extract parameters from the message
                 device, precision, timeLimit, maxTestSize, errorRange, pixelvae, seed = searchString(message, "ddevice", "dprecision", "dtimelimit", "dmaxtestsize", "derrorrange", "dpixelvae", "dseed", "end")
                 benchmark(device, precision, float(timeLimit), int(maxTestSize), int(errorRange), pixelvae, int(seed))
-                await websocket.send(f"returning benchmark {max(256, maxSize-64)}") # We subtract 64 to leave a little VRAM headroom, so it doesn't OOM if you open a youtube tab T-T
+                await websocket.send(f"returning benchmark {max(32, maxSize-8)}") # We subtract 64 to leave a little VRAM headroom, so it doesn't OOM if you open a youtube tab T-T
             except Exception as e:
                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                 play("error.wav")
