@@ -558,6 +558,7 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loraFiles,
             if "torch.cuda.OutOfMemoryError" in traceback.format_exc():
                 rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
             else:
+                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                 rprint(f"\n[#494b9b]Translation model could not be loaded.")
         if modelLM is not None:
             try:
