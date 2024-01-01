@@ -1794,7 +1794,7 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
 
     global model
     global modelCS
-    global modelFS
+    global modelTA
     global modelPV
 
     # Set the precision scope based on device and precision
@@ -1834,8 +1834,10 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
                 try:
                     shape = [1, 4, testSize, testSize]
 
+                    memory_used = psutil.Process().memory_info().rss / (1024 ** 3)
+
                     # Generate samples using the model
-                    samples_ddim = model.sample(
+                    for step, samples_ddim in enumerate(model.sample(
                         S=steps,
                         conditioning=c,
                         seed=seed,
@@ -1846,20 +1848,15 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
                         eta=0.0,
                         x_T=start_code,
                         sampler = sampler,
-                    )
+                    )):
+                        pass
+                    
+                    render(modelTA, modelPV, samples_ddim, 0, device, testSize, testSize, 8, pixelvae, False, False, ["None"], False)
 
-                    timerPerStep = round(time.time()-benchTimer, 2)
-
-                    if pixelvae:
-                        # Pixel clustering mode, lower threshold means bigger clusters
-                        denoise = 0.08
-                        x_sample = modelPV.run_cluster(samples_ddim, threshold=denoise, wrap_x=False, wrap_y=False)
-                    else:
-                        x_sample = modelFS.decoder(samples_ddim.to(device)).clamp(0, 1)
-                        
                     # Delete the samples to free up memory
                     del samples_ddim
-                    del x_sample
+
+                    timerPerStep = round(time.time()-benchTimer, 2)
                     
                     passedTest = True
                 except:
