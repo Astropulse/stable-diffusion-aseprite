@@ -622,7 +622,7 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
 
         # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
         cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-        if cardMemory >= 10:
+        if cardMemory >= 9.4:
             try:
                 # Load LLM for prompt upsampling
                 if modelLM == None:
