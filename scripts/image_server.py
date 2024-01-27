@@ -82,6 +82,8 @@ except:
 # Global variables
 global modelName
 modelName = None
+global modelSettings
+modelSettings = None
 # Unet
 global model
 # Conditioning (clip)
@@ -499,7 +501,10 @@ def load_model_from_config(model, verbose=False):
 # Load stable diffusion 1.5 format model
 def load_model(modelFileString, config, device, precision, optimized):
     global modelName
-    if modelFileString != modelName:
+    global modelSettings
+
+    modelParams = {"file": modelFileString, "device": device, "precision": precision, "optimized": optimized}
+    if modelSettings != modelParams:
         timer = time.time()
 
         if device == "cuda" and not torch.cuda.is_available():
@@ -602,6 +607,7 @@ def load_model(modelFileString, config, device, precision, optimized):
         assign_lora_names_to_compvis_modules(model, modelCS)
 
         modelName = modelFileString
+        modelSettings = modelParams
 
         # Print loading information
         play("iteration.wav")
@@ -1595,15 +1601,16 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
                 # Delete the samples to free up memory
                 del samples_ddim
 
-        for i, lora in enumerate(loadedLoras):
-            if lora is not None:
-                # Release lora
-                remove_lora_for_inference(lora)
-            if os.path.splitext(loras[i]["file"])[1] == ".pxlm":
-                if decryptedFiles[i] != "none":
-                    encrypted = fernet.encrypt(decryptedFiles[i])
-                    with open(loras[i]["file"], 'wb') as dec_file:
-                        dec_file.write(encrypted)
+        with precision_scope("cuda"):
+            for i, lora in enumerate(loadedLoras):
+                if lora is not None:
+                    # Release lora
+                    remove_lora_for_inference(lora)
+                if os.path.splitext(loras[i]["file"])[1] == ".pxlm":
+                    if decryptedFiles[i] != "none":
+                        encrypted = fernet.encrypt(decryptedFiles[i])
+                        with open(loras[i]["file"], 'wb') as dec_file:
+                            dec_file.write(encrypted)
         del loadedLoras
 
         if post:
@@ -1834,15 +1841,16 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
                 # Delete the samples to free up memory
                 del samples_ddim
 
-        for i, lora in enumerate(loadedLoras):
-            if lora is not None:
-                # Release lora
-                remove_lora_for_inference(lora)
-            if os.path.splitext(loras[i]["file"])[1] == ".pxlm":
-                if decryptedFiles[i] != "none":
-                    encrypted = fernet.encrypt(decryptedFiles[i])
-                    with open(loras[i]["file"], 'wb') as dec_file:
-                        dec_file.write(encrypted)
+        with precision_scope("cuda"):
+            for i, lora in enumerate(loadedLoras):
+                if lora is not None:
+                    # Release lora
+                    remove_lora_for_inference(lora)
+                if os.path.splitext(loras[i]["file"])[1] == ".pxlm":
+                    if decryptedFiles[i] != "none":
+                        encrypted = fernet.encrypt(decryptedFiles[i])
+                        with open(loras[i]["file"], 'wb') as dec_file:
+                            dec_file.write(encrypted)
         del loadedLoras
 
         if post:
