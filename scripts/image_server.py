@@ -76,7 +76,7 @@ try:
 except:
     import traceback
     print(f"ERROR:\n{traceback.format_exc()}")
-    input("Catastrophic failure, send this error to the developer.\nPress any key to exit.")
+    input("Could not import python libraries, please run setup again.\nPress any key to exit.")
     exit()
 
 # Global variables
