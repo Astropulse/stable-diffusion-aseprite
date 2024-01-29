@@ -1185,9 +1185,11 @@ def render(modelTA, modelPV, samples_ddim, i, device, H, W, pixelSize, pixelvae,
         x_sample = x_sample[0].cpu().numpy()
     else:
         try:
-            x_sample = modelTA.decoder(samples_ddim[i:i+1].to(device)).clamp(0, 1)
-            x_sample = 255.0 * rearrange(x_sample[0].cpu().numpy(), "c h w -> h w c")
-            x_sample = Image.fromarray(x_sample.astype(np.uint8))
+            x_sample = modelTA.decoder(samples_ddim[i:i+1].to(device))
+            x_sample = torch.clamp((x_sample.cpu().float()), min = 0.0, max = 1.0)
+            x_sample = x_sample.cpu().movedim(1, -1)
+            x_sample = 255.0 * x_sample[0].cpu().numpy()
+            x_sample = Image.fromarray(np.clip(x_sample, 0, 255).astype(np.uint8))
 
             # Color adjustments to account for Tiny Autoencoder
             contrast= ImageEnhance.Contrast(x_sample)
