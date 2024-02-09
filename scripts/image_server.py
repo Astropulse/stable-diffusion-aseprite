@@ -628,7 +628,9 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
 
         # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
         cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-        if cardMemory >= 9.4:
+        if cardMemory >= 7.6:
+            if cardMemory <= 10.2:
+                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
             try:
                 # Load LLM for prompt upsampling
                 if modelLM == None:
@@ -665,8 +667,8 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
                     
                         usedMemory = cardMemory - (torch.cuda.mem_get_info()[0] / 1073741824)
 
-                        # If the remaining vram is less than 4, unload the LLM
-                        if cardMemory-usedMemory < 4:
+                        # If the remaining vram is less than 6, unload the LLM
+                        if cardMemory-usedMemory < 6:
                             del modelLM
                             clearCache()
                             modelLM = None
@@ -691,7 +693,7 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
                     rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                     rprint(f"\n[#494b9b]Translation model could not be loaded.")
         else:
-            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 10GB of VRAM. You only have {round(cardMemory)}GB.")
+            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
     else:
         if modelLM is not None:
             del modelLM
@@ -792,7 +794,8 @@ def kCentroidVerbose(images, width, height, centroids):
         count += 1
         resized_image = kCentroid(image, int(width), int(height), int(centroids))
 
-        output.append({"name": count, "format": "png", "image": encodeImage(resized_image, "png")})
+        name = str(hash(str([image, width, height, centroids, count])))
+        output.append({"name": name, "format": "png", "image": encodeImage(resized_image, "png")})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -846,7 +849,7 @@ def pixelDetectVerbose(image):
             image_indexed = downscale.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert('RGB')
         
     play("batch.wav")
-    return [{"name": 1, "format": "png", "image": encodeImage(image_indexed, "png")}]
+    return [{"name": str(hash(str(image))), "format": "png", "image": encodeImage(image_indexed, "png")}]
 
 # Denoises an image using quantization
 def kDenoise(image, smoothing, strength):
@@ -1108,7 +1111,8 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
 
         count += 1
 
-        output.append({"name": count, "format": "png", "image": encodeImage(image_indexed, "png")})
+        name = str(hash(str([count, source, paletteURL, palettes, colors, dithering, strength, denoise, smoothness, intensity])))
+        output.append({"name": name, "format": "png", "image": encodeImage(image_indexed, "png")})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -1132,7 +1136,7 @@ def palettizeOutput(images):
 
         image_indexed = tempImage.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert('RGB')
     
-        output.append({"name": image["name"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
+        output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
     return output
 
 # Loads and applies background segmentation model
@@ -1166,7 +1170,8 @@ def rembg(images, modelpath):
             count += 1
             masked_image = masked_image.resize((image.width, image.height), resample=Image.Resampling.NEAREST)
 
-            output.append({"name": count, "format": "png", "image": encodeImage(masked_image, "png")})
+            name = str(hash(str([count, image])))
+            output.append({"name": name, "format": "png", "image": encodeImage(masked_image, "png")})
 
             if image != images[-1]:
                 play("iteration.wav")
@@ -1285,8 +1290,9 @@ def paletteGen(prompt, colors, seed, device, precision):
 
             palette.putpixel((x, y), (r, g, b))
 
+    name = hash(str([prompt, colors, seed, device]))
     rprint(f"[#c4f129]Image converted to color palette with [#48a971]{colors}[#c4f129] colors")
-    return [{"name": "palette", "format": "png", "image": encodeImage(palette.convert("RGB"), "png")}]
+    return [{"name": f"palette{name}", "format": "png", "image": encodeImage(palette.convert("RGB"), "png")}]
 
 def continuous_pattern_wave(x):
     """
@@ -1392,7 +1398,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
 
     # Derive steps, cfg, lcm weight from quality setting
     global modelPath
-    # Curves defined by https://www.desmos.com/calculator/aazom0lzyz
+    # Curves defined by https://www.desmos.com/calculator/kny0embnkg
     steps = round(3.4 + ((quality ** 2) / 1.5))
     scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
@@ -1404,7 +1410,8 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     gHeight = H // 8
 
     if gWidth >= 96 or gHeight >= 96:
-        loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": 40})
+        resfix_weight = round(max(4, min(((((math.sqrt(gWidth * gHeight)/10) - 10) ** 3) / 3000) + 4, 7.5)) * 10)
+        loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": resfix_weight})
 
     # Composition and lighting modifications
     loras = manageComposition(lighting, composition, loras)
@@ -1423,9 +1430,9 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
         gWidth = int((lower * max(1, aspect)) + ((gy/7) * aspect))
         gHeight = int((lower * max(1, 1/aspect)) + ((gx/7) * (1/aspect)))
 
-        # Curves defined by https://www.desmos.com/calculator/aazom0lzyz
-        pre_steps = round(steps * ((10 - (((quality - 1.1) ** 2) / 6)) / 10))
-        up_steps = round(steps * (((((quality - 6.5) ** 2) / 1.6) + 2.4) / 10))
+        # Curves defined by https://www.desmos.com/calculator/kny0embnkg
+        pre_steps = round(steps * ((10 - (((quality - 1.1) ** 2) / 8)) / 10))
+        up_steps = round(steps * max(0.42, ((((quality - 7.2) ** 2) / 2.5) + 3.2) / 10))
     else:
         upscale = False
 
@@ -1554,11 +1561,26 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
                         displayOut = []
                         for i in range(batch):
                             x_sample_image = fastRender(modelPV, samples_ddim, pixelSize, W, H, i)
-                            displayOut.append({"name": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                            name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, upscale, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed+i])) & 0x7FFFFFFFFFFFFFFF)
+                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
                         yield {"action": "display_title", "type": "txt2img", "value": {"text": f"Generating... {step}/{pre_steps} steps in batch {run+1}/{runs}"}}
                         yield {"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}
 
                 if upscale:
+
+                    # Apply 'cropped' lora for enhanced composition at high resolution
+                    crop_weight = max(3, min(round(math.sqrt(2 * ((math.sqrt(gx * gy)/10) - 9)), 2), 7))
+                    if True:
+                        loraPair = {"file": os.path.join(os.path.join(modelPath, "LECO"), "crop.leco"), "weight": crop_weight}
+                        loras.append(loraPair)
+                        decryptedFiles.append("none")
+                        _, loraName = os.path.split(loraPair["file"])
+                        loadedLoras.append(load_lora(loraPair["file"], model))
+                        loadedLoras[len(loadedLoras)-1].multiplier = loraPair["weight"]
+                        # Prepare for inference
+                        register_lora_for_inference(loadedLoras[len(loadedLoras)-1])
+                        apply_lora()
+
                     # Upscale latents using bilinear interpolation
                     samples_ddim = torch.nn.functional.interpolate(samples_ddim, size=(H // 8, W // 8), mode="bilinear")
                     # Encode latents
@@ -1583,7 +1605,8 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
                             displayOut = []
                             for i in range(batch):
                                 x_sample_image = fastRender(modelPV, samples_ddim, pixelSize, W, H, i)
-                                displayOut.append({"name": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                                name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, upscale, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed+i])) & 0x7FFFFFFFFFFFFFFF)
+                                displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
                             yield {"action": "display_title", "type": "txt2img", "value": {"text": f"Generating... {step}/{up_steps} steps in batch {run+1}/{runs}"}}
                             yield {"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}
                 
@@ -1595,8 +1618,9 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
                         play("iteration.wav")
 
                     seeds.append(str(seed))
+                    name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, upscale, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed])) & 0x7FFFFFFFFFFFFFFF)
 
-                    output.append({"name": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                    output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                     seed += 1
                     base_count += 1
@@ -1620,7 +1644,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}
@@ -1663,7 +1687,7 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
 
     # Derive steps, cfg, lcm weight from quality setting
     global modelPath
-    # Curves defined by https://www.desmos.com/calculator/aazom0lzyz
+    # Curves defined by https://www.desmos.com/calculator/kny0embnkg
     steps = round(9 + (((quality-1.85) ** 2) * 1.1))
     scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
@@ -1676,6 +1700,11 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     # High resolution adjustments for consistency
     if W // 8 >= 96 or H // 8 >= 96:
         loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": 40})
+    
+        # Apply 'cropped' lora for enhanced composition at high resolution
+        crop_weight = max(3, min(round(math.sqrt(2 * ((math.sqrt((W // 8) * (H // 8))/10) - 9)) + 1, 2), 7))
+        if True:
+            loras.append({"file": os.path.join(os.path.join(modelPath, "LECO"), "crop.leco"), "weight": crop_weight})
 
     # Apply modifications to raw prompts
     data, negative_data = managePrompts(prompt, negative, W, H, seed, False, total_images, loras, translate, promptTuning)
@@ -1824,7 +1853,8 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
                         displayOut = []
                         for i in range(batch):
                             x_sample_image = fastRender(modelPV, samples_ddim, pixelSize, W, H, i)
-                            displayOut.append({"name": seed+i+1, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                            name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed+i])) & 0x7FFFFFFFFFFFFFFF)
+                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
                         yield {"action": "display_title", "type": "img2img", "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}
                         yield {"action": "display_image", "type": "img2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}
 
@@ -1836,7 +1866,9 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
                         play("iteration.wav")
 
                     seeds.append(str(seed))
-                    output.append({"name": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                    name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed])) & 0x7FFFFFFFFFFFFFFF)
+
+                    output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                     seed += 1
                     base_count += 1
@@ -1860,7 +1892,7 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}
