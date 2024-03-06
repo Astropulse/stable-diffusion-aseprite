@@ -117,7 +117,7 @@ loadedDevice = "cpu"
 global modelPath
 
 global system_models
-system_models = ["quality", "resfix", "crop", "detail", "brightness", "contrast", "saturation", "outline", "color_cr", "color_mg", "color_yb", "light_bf", "light_du", "light_lr"]
+system_models = ["quality", "resfix", "adapter", "crop", "detail", "brightness", "contrast", "saturation", "outline", "color_cr", "color_mg", "color_yb", "light_bf", "light_du", "light_lr"]
 
 global sounds
 sounds = False
@@ -1610,6 +1610,7 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
         seed = randint(0, 1000000)
 
     global modelPath
+
     # Composition and lighting modifications
     loras = manageComposition(lighting, composition, loras)
 
@@ -1623,6 +1624,9 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
             lora["weight"] = lora["weight"] + 200
     if not found_contrast:
         loras.append({"file": os.path.join(lecoPath, "contrast.leco"), "weight": 200})
+
+    # Resolution adapter
+    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
     data, negative_data = managePrompts(prompt, negative, W, H, seed, False, total_images, loras, translate, promptTuning)
@@ -1825,6 +1829,9 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
 
     # Composition and lighting modifications
     loras = manageComposition(lighting, composition, loras)
+
+    # Resolution adapter
+    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Composition enhancement settings (high res fix)
     pre_steps = steps
@@ -2289,6 +2296,16 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
 
     # Derive steps, cfg, lcm weight from quality setting
     global modelPath
+
+    # High resolution adjustments for consistency
+    if math.sqrt((W // 8) * (H // 8)) >= 96:
+        loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": 40})
+    
+        # Apply 'cropped' lora for enhanced composition at high resolution
+        crop_weight = max(3, min(round(math.sqrt(max(1, 2 * ((math.sqrt((W // 8) * (H // 8))/10) - 9))) + 1, 2), 7))
+        if True:
+            loras.append({"file": os.path.join(os.path.join(modelPath, "LECO"), "crop.leco"), "weight": crop_weight})
+
     # Curves defined by https://www.desmos.com/calculator/kny0embnkg
     steps = round(9 + (((quality-1.85) ** 2) * 1.1))
     scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
@@ -2299,14 +2316,8 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     # Composition and lighting modifications
     loras = manageComposition(lighting, composition, loras)
 
-    # High resolution adjustments for consistency
-    if math.sqrt((W // 8) * (H // 8)) >= 96:
-        loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": 40})
-    
-        # Apply 'cropped' lora for enhanced composition at high resolution
-        crop_weight = max(3, min(round(math.sqrt(max(1, 2 * ((math.sqrt((W // 8) * (H // 8))/10) - 9))) + 1, 2), 7))
-        if True:
-            loras.append({"file": os.path.join(os.path.join(modelPath, "LECO"), "crop.leco"), "weight": crop_weight})
+    # Resolution adapter
+    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
     data, negative_data = managePrompts( prompt, negative, W, H, seed, False, total_images, loras, translate, promptTuning)
