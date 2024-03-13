@@ -1792,51 +1792,72 @@ def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeig
         # Compute conditioning tokens using prompt and negative
         condBatch = min(condBatch, total_images - condCount)
 
+        text_embed_batch = []
+        neg_text_embed_batch = []
+
         # Pull original text embedding for comparison
-        text_embed = modelCS.get_learned_conditioning(data[condCount:condCount+condBatch])
-        neg_text_embed = modelCS.get_learned_conditioning(negative_data[condCount:condCount+condBatch])
-        t = torch.zeros_like(text_embed)
 
-        # Run through all attributes
-        for slider in attributes["sliders"]:
-            # Extract pure positive attribute
-            token_embed = modelCS.get_learned_conditioning(slider["token"])
+        prompts = [data[condCount]]
 
-            # Check for negative attribute
-            if "neg_token" in slider:
-                # Extract pure negative attribute
-                neg_token_embed = modelCS.get_learned_conditioning(slider["neg_token"])
-            else:
-                # Add blank embed as negative, reduce weight to compensate
-                neg_token_embed = modelCS.get_learned_conditioning("")
-                slider['neg_token'] = f"not-{slider['token']}"
+        #prompts = ["pixel, a raven on a branch with mountains and bright sky in the background, pixel art",
+        #           "pixel, a tough raven standing on a tree branch in a field with rocky jagged mountains in the background, clear sky, pixel art",
+        #           "pixel, a tough raven with glowing eyes standing on a tree branch in a mountain valley, with northern mountains in the background and puffy clouds in the sky, clear sky, crisp day, pixel art",
+        #           "pixel, an old tough raven with gleaming eyes on a withered old tree branch with big scenic northern mountains in the background and a meadow in the foreground, the raven is highly detailed and the mountains are rocky and jagged, pixel art"]
 
-            # Calculate difference between positive and negative attributes
-            diff = token_embed - neg_token_embed
+        negative = [negative_data[condCount]]
 
-            # Sort and collect only the most different weights according to variance
-            concept = torch.argsort(diff[:, :5, :].abs().sum(axis=1).squeeze(0), descending=True)
+        for prompt in prompts:
+            text_embed = modelCS.get_learned_conditioning(prompt)
+            neg_text_embed = modelCS.get_learned_conditioning(negative)
 
-            # Calculate the elbow point in the differences between concepts
-            gradients = concept[:-1] - concept[1:]
-            second_derivatives = gradients[:-1] - gradients[1:]
-            elbow_point = (torch.argmax(torch.abs(second_derivatives)) + 1) // 4
+            # Run through all attributes
+            slider_embed = torch.zeros_like(text_embed)
+            for slider in attributes["sliders"]:
+                # Extract pure positive attribute
+                token_embed = modelCS.get_learned_conditioning(slider["token"])
 
-            # Slice irrelevant weights from concept embedding
-            concept = concept[:elbow_point]
+                # Check for negative attribute
+                if "neg_token" in slider:
+                    # Extract pure negative attribute
+                    neg_token_embed = modelCS.get_learned_conditioning(slider["neg_token"])
+                else:
+                    # Add blank embed as negative, reduce weight to compensate
+                    neg_token_embed = modelCS.get_learned_conditioning("")
+                    slider['neg_token'] = f"not-{slider['token']}"
 
-            # Mask and multiply by weight
-            concept_mask = torch.zeros_like(diff)
-            concept_mask[:, :, concept] = slider['weight']
-            diff = diff * concept_mask
-            t += diff
-            rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
-        
-        # Apply attributes to text embedding
-        text_embed += t
+                # Calculate difference between positive and negative attributes
+                diff = token_embed - neg_token_embed
 
-        conditioning.append([text_embed])
-        negative_conditioning.append([neg_text_embed])
+                # Sort and collect only the most different weights according to variance
+                concept = torch.argsort(diff[:, :5, :].abs().sum(axis=1).squeeze(0), descending=True)
+
+                # Calculate the elbow point in the differences between concepts
+                gradients = concept[:-1] - concept[1:]
+                second_derivatives = gradients[:-1] - gradients[1:]
+                elbow_point = (torch.argmax(torch.abs(second_derivatives)) + 1) // 4
+
+                # Slice irrelevant weights from concept embedding
+                concept = concept[:elbow_point]
+
+                # Mask and multiply by weight
+                concept_mask = torch.zeros_like(diff)
+                concept_mask[:, :, concept] = slider['weight']
+                diff = diff * concept_mask
+                slider_embed += diff
+                rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
+            
+            # Apply attributes to text embedding
+            text_embed += slider_embed
+
+            # Repeat conditioning for batches
+            text_embed = text_embed.repeat(condBatch, 1, 1)
+            neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
+
+            text_embed_batch.append(text_embed)
+            neg_text_embed_batch.append(neg_text_embed)
+
+        conditioning.append(text_embed_batch)
+        negative_conditioning.append(neg_text_embed_batch)
         shape.append([condBatch, 4, gHeight, gWidth])
         condCount += condBatch
 
