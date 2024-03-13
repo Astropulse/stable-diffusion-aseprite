@@ -1598,11 +1598,11 @@ def manageComposition(lighting, composition, loras):
         # Curve defined by https://www.desmos.com/calculator/qksu9umqae
         loras.append({"file": os.path.join(lecoPath, "brightness.leco"), "weight": round((((brightness - 13.7) ** 2) * 0.8) - 40)})
 
-    saturation = round(composition["saturation"]-50)*8
+    saturation = round(composition["saturation"]-50)*6
     if saturation != 0:
         loras.append({"file": os.path.join(lecoPath, "saturation.leco"), "weight": saturation})
 
-    contrast = round(composition["contrast"]-50)*12
+    contrast = round(composition["contrast"]-50)*4
     if contrast != 0:
         loras.append({"file": os.path.join(lecoPath, "contrast.leco"), "weight": contrast})
 
@@ -1611,6 +1611,25 @@ def manageComposition(lighting, composition, loras):
         loras.append({"file": os.path.join(lecoPath, "outline.leco"), "weight": outline})
 
     return loras
+
+
+def resize_image(original_width, original_height, target_size = 512):
+    target_area = target_size ** 2
+    aspect_ratio = original_width / original_height
+    
+    new_width = math.sqrt(target_area * aspect_ratio)
+    new_height = math.sqrt(target_area / aspect_ratio)
+    
+    # Adjust dimensions if they exceed the original dimensions, maintaining aspect ratio
+    if new_width > original_width or new_height > original_height:
+        if original_width > original_height:
+            new_width = original_width
+            new_height = new_width / aspect_ratio
+        else:
+            new_height = original_height
+            new_width = new_height * aspect_ratio
+    
+    return (int(new_width), int(new_height))  # Returning integer values for dimensions
 
 
 def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
@@ -1723,10 +1742,6 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
                 rprint(f"[#494b9b]Using [#48a971]{os.path.splitext(loraName)[0]} [#494b9b]LoRA with [#48a971]{loraPair['weight']}% [#494b9b]strength")
 
     seeds = []
-    # Create conditioning values for each batch, then unload the text encoder
-    negative_conditioning = []
-    conditioning = []
-    shape = []
     encoded_latent = []
     with precision_scope:
         if image is not None:
@@ -1754,73 +1769,87 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
             for run in range(runs):
                 encoded_latent.append(None)
 
-        modelCS.to(device)
-        condBatch = batch
-        condCount = 0
-        for run in range(runs):
-            # Compute conditioning tokens using prompt and negative
-            condBatch = min(condBatch, total_images - condCount)
+        # Concepts containing attributes and weights (can contain negative attributes or not).
+        #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
+        attributes = {"sliders": []}
 
-            # Concepts containing attributes and weights (can contain negative attributes or not).
-            #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
-            attributes = {"sliders": []}
+        with precision_scope:
+            conditioning, negative_conditioning, shape = get_text_embed(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
 
-            # Pull original text embedding for comparison
-            text_embed = modelCS.get_learned_conditioning(data[condCount:condCount+condBatch])
-            t = torch.zeros_like(text_embed)
-
-            # Run through all attributes
-            for slider in attributes["sliders"]:
-                # Extract pure positive attribute
-                token_embed = modelCS.get_learned_conditioning(slider["token"])
-
-                # Check for negative attribute
-                if "neg_token" in slider:
-                    # Extract pure negative attribute
-                    neg_token_embed = modelCS.get_learned_conditioning(slider["neg_token"])
-                else:
-                    # Add blank embed as negative, reduce weight to compensate
-                    neg_token_embed = modelCS.get_learned_conditioning("")
-                    slider['neg_token'] = f"not-{slider['token']}"
-
-                # Calculate difference between positive and negative attributes
-                diff = token_embed - neg_token_embed
-
-                # Sort and collect only the most different weights according to variance
-                concept = torch.argsort(diff[:, :5, :].abs().sum(axis=1).squeeze(0), descending=True)
-
-                # Calculate the elbow point in the differences between concepts
-                gradients = concept[:-1] - concept[1:]
-                second_derivatives = gradients[:-1] - gradients[1:]
-                elbow_point = (torch.argmax(torch.abs(second_derivatives)) + 1) // 4
-
-                # Slice irrelevant weights from concept embedding
-                concept = concept[:elbow_point]
-
-                # Mask and multiply by weight
-                concept_mask = torch.zeros_like(diff)
-                concept_mask[:, :, concept] = slider['weight']
-                diff = diff * concept_mask
-                t += diff
-                rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
-            
-            # Apply attributes to text embedding
-            text_embed += t
-
-            conditioning.append(text_embed)
-            negative_conditioning.append(modelCS.get_learned_conditioning(negative_data[condCount : condCount + condBatch]))
-            shape.append([condBatch, 4, H // 8, W // 8])
-            condCount += condBatch
-
-        # Move modelCS to CPU if necessary to free up GPU memory
-        if device == "cuda":
-            mem = torch.cuda.memory_allocated() / 1e6
-            modelCS.to("cpu")
-            # Wait until memory usage decreases
-            while torch.cuda.memory_allocated() / 1e6 >= mem:
-                time.sleep(1)
         return conditioning, negative_conditioning, encoded_latent, steps, scale, runs, data, negative_data, seeds, batch, raw_loras
     
+
+def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes):
+    # Create conditioning values for each batch, then unload the text encoder
+    negative_conditioning = []
+    conditioning = []
+    shape = []
+    # Use the specified precision scope
+    modelCS.to(device)
+    condBatch = batch
+    condCount = 0
+    for run in range(runs):
+        # Compute conditioning tokens using prompt and negative
+        condBatch = min(condBatch, total_images - condCount)
+
+        # Pull original text embedding for comparison
+        text_embed = modelCS.get_learned_conditioning(data[condCount:condCount+condBatch])
+        neg_text_embed = modelCS.get_learned_conditioning(negative_data[condCount:condCount+condBatch])
+        t = torch.zeros_like(text_embed)
+
+        # Run through all attributes
+        for slider in attributes["sliders"]:
+            # Extract pure positive attribute
+            token_embed = modelCS.get_learned_conditioning(slider["token"])
+
+            # Check for negative attribute
+            if "neg_token" in slider:
+                # Extract pure negative attribute
+                neg_token_embed = modelCS.get_learned_conditioning(slider["neg_token"])
+            else:
+                # Add blank embed as negative, reduce weight to compensate
+                neg_token_embed = modelCS.get_learned_conditioning("")
+                slider['neg_token'] = f"not-{slider['token']}"
+
+            # Calculate difference between positive and negative attributes
+            diff = token_embed - neg_token_embed
+
+            # Sort and collect only the most different weights according to variance
+            concept = torch.argsort(diff[:, :5, :].abs().sum(axis=1).squeeze(0), descending=True)
+
+            # Calculate the elbow point in the differences between concepts
+            gradients = concept[:-1] - concept[1:]
+            second_derivatives = gradients[:-1] - gradients[1:]
+            elbow_point = (torch.argmax(torch.abs(second_derivatives)) + 1) // 4
+
+            # Slice irrelevant weights from concept embedding
+            concept = concept[:elbow_point]
+
+            # Mask and multiply by weight
+            concept_mask = torch.zeros_like(diff)
+            concept_mask[:, :, concept] = slider['weight']
+            diff = diff * concept_mask
+            t += diff
+            rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
+        
+        # Apply attributes to text embedding
+        text_embed += t
+
+        conditioning.append([text_embed])
+        negative_conditioning.append([neg_text_embed])
+        shape.append([condBatch, 4, gHeight, gWidth])
+        condCount += condBatch
+
+    # Move modelCS to CPU if necessary to free up GPU memory
+    if device == "cuda":
+        mem = torch.cuda.memory_allocated() / 1e6
+        modelCS.to("cpu")
+        # Wait until memory usage decreases
+        while torch.cuda.memory_allocated() / 1e6 >= mem:
+            time.sleep(1)
+
+    return conditioning, negative_conditioning, shape
+
 
 # Generate image from text prompt
 def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
@@ -1904,7 +1933,6 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     sampler = "pxlcm"
 
     global model
-    global modelCS
     global modelTA
     global modelPV
 
@@ -1968,78 +1996,13 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
             loadedLoras.append(None)
 
     seeds = []
-    # with torch.no_grad():
-    # Create conditioning values for each batch, then unload the text encoder
-    negative_conditioning = []
-    conditioning = []
-    shape = []
-    # Use the specified precision scope
+
+    # Concepts containing attributes and weights (can contain negative attributes or not).
+    #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
+    attributes = {"sliders": []}
+
     with precision_scope:
-        modelCS.to(device)
-        condBatch = batch
-        condCount = 0
-        for run in range(runs):
-            # Compute conditioning tokens using prompt and negative
-            condBatch = min(condBatch, total_images - condCount)
-
-            # Concepts containing attributes and weights (can contain negative attributes or not).
-            #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
-            attributes = {"sliders": []}
-
-            # Pull original text embedding for comparison
-            text_embed = modelCS.get_learned_conditioning(data[condCount:condCount+condBatch])
-            t = torch.zeros_like(text_embed)
-
-            # Run through all attributes
-            for slider in attributes["sliders"]:
-                # Extract pure positive attribute
-                token_embed = modelCS.get_learned_conditioning(slider["token"])
-
-                # Check for negative attribute
-                if "neg_token" in slider:
-                    # Extract pure negative attribute
-                    neg_token_embed = modelCS.get_learned_conditioning(slider["neg_token"])
-                else:
-                    # Add blank embed as negative, reduce weight to compensate
-                    neg_token_embed = modelCS.get_learned_conditioning("")
-                    slider['neg_token'] = f"not-{slider['token']}"
-
-                # Calculate difference between positive and negative attributes
-                diff = token_embed - neg_token_embed
-
-                # Sort and collect only the most different weights according to variance
-                concept = torch.argsort(diff[:, :5, :].abs().sum(axis=1).squeeze(0), descending=True)
-
-                # Calculate the elbow point in the differences between concepts
-                gradients = concept[:-1] - concept[1:]
-                second_derivatives = gradients[:-1] - gradients[1:]
-                elbow_point = (torch.argmax(torch.abs(second_derivatives)) + 1) // 4
-
-                # Slice irrelevant weights from concept embedding
-                concept = concept[:elbow_point]
-
-                # Mask and multiply by weight
-                concept_mask = torch.zeros_like(diff)
-                concept_mask[:, :, concept] = slider['weight']
-                diff = diff * concept_mask
-                t += diff
-                rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
-            
-            # Apply attributes to text embedding
-            text_embed += t
-
-            conditioning.append(text_embed)
-            negative_conditioning.append(modelCS.get_learned_conditioning(negative_data[condCount : condCount + condBatch]))
-            shape.append([condBatch, 4, gHeight, gWidth])
-            condCount += condBatch
-
-        # Move modelCS to CPU if necessary to free up GPU memory
-        if device == "cuda":
-            mem = torch.cuda.memory_allocated() / 1e6
-            modelCS.to("cpu")
-            # Wait until memory usage decreases
-            while torch.cuda.memory_allocated() / 1e6 >= mem:
-                time.sleep(1)
+        conditioning, negative_conditioning, shape = get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes)
     
     with torch.no_grad():
         base_count = 0
@@ -2055,12 +2018,12 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
                 for step, samples_ddim in enumerate(
                     model.sample(
                         S=pre_steps,
-                        conditioning=conditioning[run],
+                        conditional_guidance=conditioning[run],
                         seed=seed,
                         shape=shape[run],
                         verbose=False,
                         unconditional_guidance_scale=scale,
-                        unconditional_conditioning=negative_conditioning[run],
+                        unconditional_guidance=negative_conditioning[run],
                         eta=0.0,
                         x_T=start_code,
                         sampler=sampler,
@@ -2100,7 +2063,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
                             conditioning[run],
                             encoded_latent,
                             unconditional_guidance_scale=scale,
-                            unconditional_conditioning=negative_conditioning[run],
+                            unconditional_guidance=negative_conditioning[run],
                             sampler="ddim",
                         )
                     ):
@@ -2156,25 +2119,6 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
-
-
-def resize_image(original_width, original_height, target_size = 512):
-    target_area = target_size ** 2
-    aspect_ratio = original_width / original_height
-    
-    new_width = math.sqrt(target_area * aspect_ratio)
-    new_height = math.sqrt(target_area / aspect_ratio)
-    
-    # Adjust dimensions if they exceed the original dimensions, maintaining aspect ratio
-    if new_width > original_width or new_height > original_height:
-        if original_width > original_height:
-            new_width = original_width
-            new_height = new_width / aspect_ratio
-        else:
-            new_height = original_height
-            new_width = new_height * aspect_ratio
-    
-    return (int(new_width), int(new_height))  # Returning integer values for dimensions
 
 
 def neural_inference(modelFileString, title, controlnets, prompt, negative, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
@@ -2431,14 +2375,9 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     strength = max(0.001, min(strength, 1.0))
 
     with torch.no_grad():
-        # Create conditioning values for each batch, then unload the text encoder
-        negative_conditioning = []
-        conditioning = []
         encoded_latent = []
 
         with precision_scope:
-            # Move the modelTA to the specified device
-            # modelTA.to(device)
             latentBatch = batch
             latentCount = 0
 
@@ -2466,23 +2405,11 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
                 ))
                 latentCount += latentBatch
 
-            modelCS.to(device)
-            condBatch = batch
-            condCount = 0
-            for run in range(runs):
-                # Compute conditioning tokens using prompt and negative
-                condBatch = min(condBatch, total_images - condCount)
-                negative_conditioning.append(modelCS.get_learned_conditioning(negative_data[condCount : condCount + condBatch]))
-                conditioning.append(modelCS.get_learned_conditioning(data[condCount : condCount + condBatch]))
-                condCount += condBatch
-
-            # Move modelCS to CPU if necessary to free up GPU memory
-            if device == "cuda":
-                mem = torch.cuda.memory_allocated() / 1e6
-                modelCS.to("cpu")
-                # Wait until memory usage decreases
-                while torch.cuda.memory_allocated() / 1e6 >= mem:
-                    time.sleep(1)
+            # Concepts containing attributes and weights (can contain negative attributes or not).
+            #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
+            attributes = {"sliders": []}
+            
+            conditioning, negative_conditioning, shape = get_text_embed(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
 
         base_count = 0
         output = []
@@ -2499,7 +2426,7 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
                         conditioning[run],
                         encoded_latent[run],
                         unconditional_guidance_scale=scale,
-                        unconditional_conditioning=negative_conditioning[run],
+                        unconditional_guidance=negative_conditioning[run],
                         sampler=sampler,
                     )
                 ):
@@ -3235,10 +3162,10 @@ async def server(websocket):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size. If samples are at 100%, this was caused by the VAE running out of memory, try enabling the Fast Pixel Decoder")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            elif ("Expected batch_size > 0 to be true" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
-                            elif ("cannot reshape tensor of 0 elements" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
+                            #elif ("Expected batch_size > 0 to be true" in traceback.format_exc()):
+                            #    rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
+                            #elif ("cannot reshape tensor of 0 elements" in traceback.format_exc()):
+                            #    rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
                             else:
                                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")

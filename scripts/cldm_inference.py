@@ -72,8 +72,8 @@ def load_controlnet(
         )
 
     # Compute conditioning
-    cldm_conditioning = [[conditioning[0], {"pooled_output": None}]]
-    cldm_negative_conditioning = [[negative_conditioning[0], {"pooled_output": None}]]
+    cldm_conditioning = [[conditioning[0][0], {"pooled_output": None}]]
+    cldm_negative_conditioning = [[negative_conditioning[0][0], {"pooled_output": None}]]
 
     for controlnet_input in controlnets:
         # Load controlnet model

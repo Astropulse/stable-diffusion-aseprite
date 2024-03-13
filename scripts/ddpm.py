@@ -665,7 +665,7 @@ class UNet(DDPM):
     def sample(
         self,
         S,
-        conditioning,
+        conditional_guidance,
         x0=None,
         shape=None,
         seed=1234,
@@ -683,7 +683,7 @@ class UNet(DDPM):
         x_T=None,
         log_every_t=100,
         unconditional_guidance_scale=1.0,
-        unconditional_conditioning=None,
+        unconditional_guidance=None,
     ):
         if self.turbo:
             self.model1.to(self.cdevice)
@@ -707,10 +707,10 @@ class UNet(DDPM):
         if sampler == "ddim":
             for samples in self.ddim_sampling(
                 x_latent,
-                conditioning,
+                conditional_guidance,
                 S,
                 unconditional_guidance_scale=unconditional_guidance_scale,
-                unconditional_conditioning=unconditional_conditioning,
+                unconditional_guidance=unconditional_guidance,
                 mask=mask,
                 init_latent=x_T,
                 use_original_steps=False,
@@ -723,8 +723,8 @@ class UNet(DDPM):
                 self.alphas_cumprod,
                 x_latent,
                 S,
-                conditioning,
-                unconditional_conditioning=unconditional_conditioning,
+                conditional_guidance,
+                unconditional_guidance=unconditional_guidance,
                 unconditional_guidance_scale=unconditional_guidance_scale,
             ):
                 yield samples
@@ -777,10 +777,10 @@ class UNet(DDPM):
     def ddim_sampling(
         self,
         x_latent,
-        cond,
+        conditional_guidance,
         t_start,
         unconditional_guidance_scale=1.0,
-        unconditional_conditioning=None,
+        unconditional_guidance=None,
         mask=None,
         init_latent=None,
         use_original_steps=False,
@@ -805,15 +805,20 @@ class UNet(DDPM):
                 x0_noisy = x0
                 x_dec = x0_noisy * mask + (1.0 - mask) * x_dec
 
+            # Get conditioning from timestep
+            condStep = min(max(1, math.ceil((len(conditional_guidance) / len(time_range)) * (i + 1))), len(conditional_guidance)) - 1
+            text_embed = conditional_guidance[condStep]
+            neg_text_embed = unconditional_guidance[condStep]
+
             x_dec = self.p_sample_ddim(
                 x_dec,
-                cond,
+                text_embed,
                 ts,
                 index=index,
                 total=len(time_range),
                 use_original_steps=use_original_steps,
                 unconditional_guidance_scale=unconditional_guidance_scale,
-                unconditional_conditioning=unconditional_conditioning,
+                unconditional_guidance=neg_text_embed,
             )
             yield x_dec
 
@@ -821,7 +826,7 @@ class UNet(DDPM):
     def p_sample_ddim(
         self,
         x,
-        c,
+        conditional_guidance,
         t,
         index,
         total,
@@ -833,23 +838,23 @@ class UNet(DDPM):
         score_corrector=None,
         corrector_kwargs=None,
         unconditional_guidance_scale=1.0,
-        unconditional_conditioning=None,
+        unconditional_guidance=None,
     ):
         b, *_, device = *x.shape, x.device
 
-        if unconditional_conditioning is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3)))):
-            e_t = self.apply_model(x, t, c)
+        if unconditional_guidance is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3)))):
+            e_t = self.apply_model(x, t, conditional_guidance)
         else:
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
-            c_in = torch.cat([unconditional_conditioning, c])
+            c_in = torch.cat([unconditional_guidance, conditional_guidance])
             e_t_uncond, e_t = self.apply_model(x_in, t_in, c_in).chunk(2)
             e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
         if score_corrector is not None:
             assert self.model.parameterization == "eps"
             e_t = score_corrector.modify_score(
-                self.model, e_t, x, t, c, **corrector_kwargs
+                self.model, e_t, x, t, conditional_guidance, **corrector_kwargs
             )
 
         alphas = self.ddim_alphas
@@ -882,8 +887,8 @@ class UNet(DDPM):
         ac,
         x,
         S,
-        cond,
-        unconditional_conditioning=None,
+        conditional_guidance,
+        unconditional_guidance=None,
         unconditional_guidance_scale=1,
         extra_args=None,
         callback=None,
@@ -899,29 +904,34 @@ class UNet(DDPM):
         x = x * sigmas[0]
 
         s_in = x.new_ones([x.shape[0]]).half()
-        for i in clbar(range(len(sigmas) - 1), name = "Samples", position = "first", prefixwidth = 12, suffixwidth = 28):
+        for index in clbar(range(len(sigmas) - 1), name = "Samples", position = "first", prefixwidth = 12, suffixwidth = 28):
             gamma = (
                 min(s_churn / (len(sigmas) - 1), 2**0.5 - 1)
-                if s_tmin <= sigmas[i] <= s_tmax
+                if s_tmin <= sigmas[index] <= s_tmax
                 else 0.0
             )
             eps = torch.randn_like(x) * s_noise
-            sigma_hat = (sigmas[i] * (gamma + 1)).half()
+            sigma_hat = (sigmas[index] * (gamma + 1)).half()
             if gamma > 0:
-                x = x + eps * (sigma_hat**2 - sigmas[i] ** 2) ** 0.5
+                x = x + eps * (sigma_hat**2 - sigmas[index] ** 2) ** 0.5
 
             s_i = sigma_hat * s_in
 
-            if unconditional_conditioning is None or unconditional_guidance_scale == 1.0 or (i % min(5, max(1, round(len(sigmas)/10))) > 0 and (i >= min(20, max(8, len(sigmas)/3)))):
+            # Get conditioning from timestep
+            condStep = min(max(1, math.ceil((len(conditional_guidance) / (len(sigmas)-1)) * (index + 1))), len(conditional_guidance)) - 1
+            text_embed = conditional_guidance[condStep]
+            neg_text_embed = unconditional_guidance[condStep]
+
+            if neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(len(sigmas)/10))) > 0 and (index >= min(20, max(8, len(sigmas)/3)))):
                 c_out, c_in = [
                     append_dims(tmp, x.ndim) for tmp in cvd.get_scalings(s_i)
                 ]
-                eps = self.apply_model(x * c_in, cvd.sigma_to_t(s_i), cond)
+                eps = self.apply_model(x * c_in, cvd.sigma_to_t(s_i), text_embed)
                 denoised = x + eps * c_out
             else:
                 x_in = torch.cat([x] * 2)
                 t_in = torch.cat([s_i] * 2)
-                cond_in = torch.cat([unconditional_conditioning, cond])
+                cond_in = torch.cat([neg_text_embed, text_embed])
                 c_out, c_in = [
                     append_dims(tmp, x_in.ndim) for tmp in cvd.get_scalings(t_in)
                 ]
@@ -930,16 +940,6 @@ class UNet(DDPM):
                 denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
             d = to_d(x, sigma_hat, denoised)
-            if callback is not None:
-                callback(
-                    {
-                        "x": x,
-                        "i": i,
-                        "sigma": sigmas[i],
-                        "sigma_hat": sigma_hat,
-                        "denoised": denoised,
-                    }
-                )
-            dt = sigmas[i + 1] - sigma_hat
+            dt = sigmas[index + 1] - sigma_hat
             x = x + d * dt
             yield x
