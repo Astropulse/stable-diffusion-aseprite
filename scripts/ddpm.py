@@ -842,7 +842,7 @@ class UNet(DDPM):
     ):
         b, *_, device = *x.shape, x.device
 
-        if unconditional_guidance is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3)))):
+        if len(conditional_guidance) == 1 and (unconditional_guidance is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3))))):
             e_t = self.apply_model(x, t, conditional_guidance)
         else:
             x_in = torch.cat([x] * 2)
@@ -922,7 +922,7 @@ class UNet(DDPM):
             text_embed = conditional_guidance[condStep]
             neg_text_embed = unconditional_guidance[condStep]
 
-            if neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(len(sigmas)/10))) > 0 and (index >= min(20, max(8, len(sigmas)/3)))):
+            if len(conditional_guidance) == 1 and (neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(len(sigmas)/10))) > 0 and (index >= min(20, max(8, len(sigmas)/3))))):
                 c_out, c_in = [
                     append_dims(tmp, x.ndim) for tmp in cvd.get_scalings(s_i)
                 ]
