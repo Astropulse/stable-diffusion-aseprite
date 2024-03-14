@@ -38,6 +38,17 @@ from rich import print as rprint
 from colorama import just_fix_windows_console
 just_fix_windows_console()
 
+def map_range(value, original_range, target_range, power=2):
+    in_min, in_max = original_range
+    out_min, out_max = target_range
+
+    # Normalize the value to a 0-1 range
+    normalized_value = (value - in_min) / (in_max - in_min)
+    # Apply the power to the normalized value to weight it
+    weighted_value = normalized_value ** power
+    # Scale and shift the weighted value to the desired output range
+    return weighted_value * (out_max - out_min) + out_min
+
 def clbar(iterable, name = "", printEnd = "\r", position = "", unit = "it", disable = False, prefixwidth = 1, suffixwidth = 1, total = 0):
 
     # Console manipulation stuff
@@ -806,9 +817,23 @@ class UNet(DDPM):
                 x_dec = x0_noisy * mask + (1.0 - mask) * x_dec
 
             # Get conditioning from timestep
-            condStep = min(max(1, math.ceil((len(conditional_guidance) / len(time_range)) * (i + 1))), len(conditional_guidance)) - 1
-            text_embed = conditional_guidance[condStep]
-            neg_text_embed = unconditional_guidance[condStep]
+            condStep = map_range(i, (0, len(time_range)-1), (0, len(conditional_guidance)-1), 0.5)
+            condStepInt = round(condStep)
+
+            text_embed = conditional_guidance[condStepInt]
+            neg_text_embed = unconditional_guidance[condStepInt]
+
+            # Fraction off of whole number
+            fraction_off = condStep - math.floor(condStep)
+
+            # Lerp conditioning smoothly
+            if fraction_off > 0.5 and fraction_off > 0:
+                lerp_text_embed = text_embed
+                text_embed = conditional_guidance[condStepInt-1]
+                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
+            elif condStepInt < len(conditional_guidance)-1 and fraction_off > 0:
+                lerp_text_embed = conditional_guidance[condStepInt+1]
+                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
 
             x_dec = self.p_sample_ddim(
                 x_dec,
@@ -918,9 +943,23 @@ class UNet(DDPM):
             s_i = sigma_hat * s_in
 
             # Get conditioning from timestep
-            condStep = min(max(1, math.ceil((len(conditional_guidance) / (len(sigmas)-1)) * (index + 1))), len(conditional_guidance)) - 1
-            text_embed = conditional_guidance[condStep]
-            neg_text_embed = unconditional_guidance[condStep]
+            condStep = map_range(index, (0, len(sigmas)-2), (0, len(conditional_guidance)-1), 0.5)
+            condStepInt = round(condStep)
+
+            text_embed = conditional_guidance[condStepInt]
+            neg_text_embed = unconditional_guidance[condStepInt]
+
+            # Fraction off of whole number
+            fraction_off = condStep - math.floor(condStep)
+
+            # Lerp conditioning smoothly
+            if fraction_off > 0.5 and fraction_off > 0:
+                lerp_text_embed = text_embed
+                text_embed = conditional_guidance[condStepInt-1]
+                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
+            elif condStepInt < len(conditional_guidance)-1 and fraction_off > 0:
+                lerp_text_embed = conditional_guidance[condStepInt+1]
+                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
 
             if len(conditional_guidance) == 1 and (neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(len(sigmas)/10))) > 0 and (index >= min(20, max(8, len(sigmas)/3))))):
                 c_out, c_in = [
