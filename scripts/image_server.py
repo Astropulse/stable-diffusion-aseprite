@@ -1799,12 +1799,12 @@ def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeig
 
         prompts = [data[condCount]]
 
-        #prompts = ["pixel, a raven on a branch with mountains and bright sky in the background, pixel art",
-        #           "pixel, a tough raven standing on a tree branch in a field with rocky jagged mountains in the background, clear sky, pixel art",
-        #           "pixel, a tough raven with glowing eyes standing on a tree branch in a mountain valley, with northern mountains in the background and puffy clouds in the sky, clear sky, crisp day, pixel art",
-        #           "pixel, an old tough raven with gleaming eyes on a withered old tree branch with big scenic northern mountains in the background and a meadow in the foreground, the raven is highly detailed and the mountains are rocky and jagged, pixel art"]
+        #prompts = ["pixel, a raven on a branch with mountains and bright sky in the background",
+        #           "pixel, a tough raven standing on a tree branch in a field with rocky jagged mountains in the background, clear sky",
+        #           "pixel, a tough raven with glowing eyes standing on a tree branch in a mountain valley, with northern mountains in the background and puffy clouds in the sky, clear sky, crisp day",
+        #           "pixel, an old tough raven with gleaming eyes on a withered old tree branch with big scenic northern mountains in the background and a meadow in the foreground, the raven is highly detailed and the mountains are rocky and jagged"]
 
-        negative = [negative_data[condCount]]
+        negative = negative_data[condCount]
 
         for prompt in prompts:
             text_embed = modelCS.get_learned_conditioning(prompt)
