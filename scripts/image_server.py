@@ -13,7 +13,7 @@ try:
     from itertools import product
     from einops import rearrange
     from pytorch_lightning import seed_everything
-    from transformers import BlipProcessor, BlipForConditionalGeneration, set_seed
+    from transformers import BlipProcessor, BlipForConditionalGeneration
     from typing import Optional
     from safetensors.torch import load_file
     from cryptography.fernet import Fernet
@@ -30,7 +30,7 @@ try:
         register_lora_for_inference,
         remove_lora_for_inference,
     )
-    from upsample_prompts import load_chat_pipeline, upsample_caption, collect_response
+    from upsample_prompts import load_chat_pipeline, upsample_caption, collect_response, cascade_caption, collect_cascade_response
     import segmenter
     import hitherdither
 
@@ -843,16 +843,14 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
             return sd, modelFileString
 
 
-# Apply prompt enhancements, defaults, and language model management
-def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, translate, promptTuning):
+# Generate prompts with LLM
+def generateLLMPrompts(prompts, negatives, seed, translate):
     timer = time.time()
     global modelLM
     global loadedDevice
     global modelType
     global sounds
     global modelPath
-
-    prompts = [prompt] * generations
 
     if translate:
         # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
@@ -872,7 +870,7 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
                 if modelLM is not None:
                     try:
                         # Generate responses
-                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{generations} [white]enhanced prompts")
+                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
 
                         upsampled_captions = []
                         for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
@@ -880,15 +878,15 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
                             upsampled_caption = None
                             retrys = 5
                             while upsampled_caption == None and retrys > 0:
-                                outputs = upsample_caption(modelLM, prompt, seed)
+                                outputs = upsample_caption(modelLM, prompt[0], seed)
                                 upsampled_caption = collect_response(outputs)
                                 retrys -= 1
                             seed += 1
 
                             if upsampled_caption == None:
-                                upsampled_caption = prompt
+                                upsampled_caption = prompt[0]
 
-                            upsampled_captions.append(upsampled_caption)
+                            upsampled_captions.append([upsampled_caption])
                             play("iteration.wav")
 
                         prompts = upsampled_captions
@@ -898,7 +896,7 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
                         seed = seed - len(prompts)
                         print()
                         for i, prompt in enumerate(prompts[:8]):
-                            rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Prompt: [#494b9b]{prompt}")
+                            rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Prompt: [#494b9b]{prompt[0]}")
                             seed += 1
                         if len(prompts) > 8:
                             rprint(f"[#48a971]Remaining prompts generated but not displayed.")
@@ -919,66 +917,154 @@ def managePrompts(prompt, negative, W, H, seed, upscale, generations, loras, tra
             del modelLM
             clearCache()
             modelLM = None
+    
+    return prompts, negatives
 
+
+# Generate cascading prompts with LLM
+def generateCascadePrompts(prompts, negatives, seed, translate):
+    timer = time.time()
+    global modelLM
+    global loadedDevice
+    global modelType
+    global sounds
+    global modelPath
+
+    if translate:
+        # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
+        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        if cardMemory >= 7.6:
+            if cardMemory <= 10.2:
+                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
+            try:
+                # Load LLM for prompt upsampling
+                if modelLM == None:
+                    print("\nLoading prompt translation language model")
+                    modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
+                    play("iteration.wav")
+
+                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+
+                if modelLM is not None:
+                    try:
+                        # Generate responses
+                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
+
+                        upsampled_captions = []
+                        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
+                            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
+                            upsampled_caption = None
+                            retrys = 5
+                            while upsampled_caption == None and retrys > 0:
+                                outputs = cascade_caption(modelLM, prompt[0], seed)
+                                upsampled_caption = json.loads(collect_cascade_response(outputs))["prompts"]
+                                retrys -= 1
+                            seed += 1
+
+                            if upsampled_caption == None:
+                                upsampled_caption = prompt[0]
+
+                            upsampled_captions.append([upsampled_caption])
+                            play("iteration.wav")
+
+                        prompts = upsampled_captions
+                        del outputs, upsampled_caption
+                        clearCache()
+
+                        seed = seed - len(prompts)
+                        print()
+                        for i, prompt in enumerate(prompts[:4]):
+                            cascade = ""
+                            for i, layer in enumerate(prompt[0]):
+                                cascade = f"{cascade}\n[#48a971]Layer: [#c4f129]{i+1} [#48a971]Prompt:[#494b9b]{layer}"
+
+                            rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt layers: [#494b9b]{cascade}")
+                            seed += 1
+                        if len(prompts) > 8:
+                            rprint(f"[#48a971]Remaining prompts generated but not displayed.")
+                    except:
+                        rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
+            except Exception as e:
+                if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
+                    rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
+                elif "GPU is required" in traceback.format_exc():
+                    rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
+                else:
+                    rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                    rprint(f"\n[#494b9b]Translation model could not be loaded.")
+        else:
+            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
+    else:
+        if modelLM is not None:
+            del modelLM
+            clearCache()
+            modelLM = None
+    
+    return prompts, negatives
+
+
+# String only manupulation of prompt and negative
+def managePrompts(prompts, negatives, loras, promptTuning):
     # Load lora names
     loraNames = [os.path.split(d["file"])[1] for d in loras if "file" in d]
 
-    # Deal with prompt modifications
-    if modelType == "pixel" and promptTuning:
-        # Defaults
-        prefix = "pixel art"
-        suffix = "detailed"
-        negativeList = [negative, "mutated, noise, nsfw, nude, frame, film reel, snowglobe, deformed, stock image, watermark, text, signature, username"]
+    out_prompts = []
+    out_negatives = []
 
-        # Lora specific modifications
-        if any(f"{_}.pxlm" in loraNames for _ in [
-            "topdown",
-            "isometric",
-            "neogeo",
-            "nes",
-            "snes",
-            "playstation",
-            "gameboy",
-            "gameboyadvance"
-        ]):
-            prefix = "pixel"
-            suffix = ""
-        elif any(f"{_}.pxlm" in loraNames for _ in ["frontfacing", "gameicons", "flatshading"]):
-            prefix = "pixel"
-            suffix = "pixel art"
-        elif any(f"{_}.pxlm" in loraNames for _ in ["nashorkimitems"]):
-            prefix = "pixel, item"
-            suffix = ""
-            negativeList.insert(0, "vibrant, colorful")
-        elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters"]):
-            prefix = "pixel"
-            suffix = "blank background"
+    negative = negatives[0]
 
-        if any(f"{_}.pxlm" in loraNames for _ in ["1bit"]):
-            prefix = f"{prefix}, 1-bit"
-            suffix = f"{suffix}, pixel art, black and white, white background"
-            negativeList.insert(0, "color, colors")
+    for i, prompt in enumerate(prompts):
+        # Deal with prompt modifications
+        if modelType == "pixel" and promptTuning:
+            # Defaults
+            prefix = "pixel art"
+            suffix = "detailed"
+            negativeList = [negative, "mutated, noise, nsfw, nude, frame, film reel, snowglobe, deformed, stock image, watermark, text, signature, username"]
 
-        if any(f"{_}.pxlm" in loraNames for _ in ["tiling", "tiling16", "tiling32"]):
-            prefix = f"{prefix}, texture"
-            suffix = f"{suffix}, pixel art"
+            # Lora specific modifications
+            if any(f"{_}.pxlm" in loraNames for _ in [
+                "topdown",
+                "isometric",
+                "neogeo",
+                "nes",
+                "snes",
+                "playstation",
+                "gameboy",
+                "gameboyadvance"
+            ]):
+                prefix = "pixel"
+                suffix = ""
+            elif any(f"{_}.pxlm" in loraNames for _ in ["frontfacing", "gameicons", "flatshading"]):
+                prefix = "pixel"
+                suffix = "pixel art"
+            elif any(f"{_}.pxlm" in loraNames for _ in ["nashorkimitems"]):
+                prefix = "pixel, item"
+                suffix = ""
+                negativeList.insert(0, "vibrant, colorful")
+            elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters"]):
+                prefix = "pixel"
+                suffix = "blank background"
 
-        # Model specific modifications
-        if math.sqrt(W * H) >= 832 and not upscale:
-            suffix = f"{suffix}, pjpixdeuc art style"
+            if any(f"{_}.pxlm" in loraNames for _ in ["1bit"]):
+                prefix = f"{prefix}, 1-bit"
+                suffix = f"{suffix}, pixel art, black and white, white background"
+                negativeList.insert(0, "color, colors")
 
-        # Combine all prompt modifications
-        negatives = [", ".join(negativeList)] * generations
-        for i, prompt in enumerate(prompts):
-            prompts[i] = f"{prefix}, {prompt}, {suffix}"
-    else:
-        if promptTuning:
-            negatives = [f"{negative}, pixel art, blurry, mutated, deformed, borders, watermark, text"] * generations
+            if any(f"{_}.pxlm" in loraNames for _ in ["tiling", "tiling16", "tiling32"]):
+                prefix = f"{prefix}, texture"
+                suffix = f"{suffix}, pixel art"
+
+            # Combine all prompt modifications
+            out_prompts.append(f"{prefix}, {prompt}, {suffix}")
+            out_negatives.append(", ".join(negativeList))
         else:
-            negatives = [f"{negative}, pixel art"] * generations
+            if promptTuning:
+                out_negatives.append(f"{negative}, pixel art, blurry, mutated, deformed, borders, watermark, text")
+            else:
+                out_negatives.append(f"{negative}, pixel art")
 
     del loraNames
-    return prompts, negatives
+    return out_prompts, out_negatives
 
 
 # K-centroid downscaling alg
@@ -1686,7 +1772,15 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
     loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
-    data, negative_data = managePrompts(prompt, negative, W, H, seed, False, total_images, loras, translate, promptTuning)
+    prompts = [[prompt]] * total_images
+    negatives = [[negative]] * total_images
+    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, translate)
+    data = []
+    negative_data = []
+    for i, prompt_batch in enumerate(prompts):
+        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning)
+        data.append(temp_p)
+        negative_data.append(temp_n)
     seed_everything(seed)
 
     rprint(f"\n[#48a971]{title}[white] generating [#48a971]{total_images}[white] images with [#48a971]{steps}[white] steps over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
@@ -1797,18 +1891,26 @@ def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeig
 
         # Pull original text embedding for comparison
 
-        prompts = [data[condCount]]
+        prompts = data[condCount]
 
-        #prompts = ["pixel, a raven on a branch with mountains and bright sky in the background",
+        #prompts = ["pixel, a raven with mountains in the background",
+        #           "pixel, a raven on a branch with mountains and bright sky in the background",
         #           "pixel, a tough raven standing on a tree branch in a field with rocky jagged mountains in the background, clear sky",
         #           "pixel, a tough raven with glowing eyes standing on a tree branch in a mountain valley, with northern mountains in the background and puffy clouds in the sky, clear sky, crisp day",
         #           "pixel, an old tough raven with gleaming eyes on a withered old tree branch with big scenic northern mountains in the background and a meadow in the foreground, the raven is highly detailed and the mountains are rocky and jagged"]
 
-        negative = negative_data[condCount]
+        #prompts = ["pixel, a futuristic city at twilight",
+        #            "pixel, a city where traditional architecture meets neon skyscrapers, with a grand river reflecting lights",
+        #            "pixel, a cityscape with neon-lit skyscrapers and holographic ads, floating vehicles, and a river reflecting vibrant lights",
+        #            "pixel, a bustling city with neon skyscrapers, traditional buildings, holographic ads, floating vehicles, and green rooftops, all under a twilight sky",
+        #            "pixel, a vibrant futuristic city at twilight, merging traditional architecture with neon-lit skyscrapers. The city buzzes with holographic advertisements, floating vehicles, and drones. A grand river reflects the lively lights, while green rooftops and vertical gardens add nature to the urban landscape. A colossal digital clock tower, with a face of ever-changing patterns, stands as a beacon under a sky transitioning to night, the first stars appearing."]
+        
+
+
+        negatives = negative_data[condCount]
 
         for prompt in prompts:
             text_embed = modelCS.get_learned_conditioning(prompt)
-            neg_text_embed = modelCS.get_learned_conditioning(negative)
 
             # Run through all attributes
             slider_embed = torch.zeros_like(text_embed)
@@ -1851,9 +1953,13 @@ def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeig
 
             # Repeat conditioning for batches
             text_embed = text_embed.repeat(condBatch, 1, 1)
-            neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
-
             text_embed_batch.append(text_embed)
+
+        for negative in negatives:
+            neg_text_embed = modelCS.get_learned_conditioning(negative)
+
+            # Repeat conditioning for batches
+            neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
             neg_text_embed_batch.append(neg_text_embed)
 
         conditioning.append(text_embed_batch)
@@ -1942,7 +2048,16 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
         upscale = False
 
     # Apply modifications to raw prompts
-    data, negative_data = managePrompts(prompt, negative, W, H, seed, upscale, total_images, loras, translate, promptTuning,)
+    prompts = [[prompt]] * total_images
+    negatives = [[negative]] * total_images
+    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, translate)
+    data = []
+    negative_data = []
+    for i, prompt_batch in enumerate(prompts):
+        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning)
+        data.append(temp_p)
+        negative_data.append(temp_n)
+
     seed_everything(seed)
 
     rprint(f"\n[#48a971]Text to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
@@ -2322,7 +2437,15 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
-    data, negative_data = managePrompts( prompt, negative, W, H, seed, False, total_images, loras, translate, promptTuning)
+    prompts = [[prompt]] * total_images
+    negatives = [[negative]] * total_images
+    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, translate)
+    data = []
+    negative_data = []
+    for i, prompt_batch in enumerate(prompts):
+        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning)
+        data.append(temp_p)
+        negative_data.append(temp_n)
     seed_everything(seed)
 
     rprint(f"\n[#48a971]Image to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
