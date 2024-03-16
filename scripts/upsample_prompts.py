@@ -288,6 +288,10 @@ def collect_cascade_response(assistant_output):
     output = output.replace("<|im_end|>", "")
     parts = output.rsplit("<|im_start|>assistant", 1)
     assistant_reply = parts[1].strip() if len(parts) > 1 else None
+    try:
+        assistant_reply = json.loads(assistant_reply)["prompts"]
+    except:
+        assistant_reply = None
     return assistant_reply
 
 

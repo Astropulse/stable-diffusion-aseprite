@@ -954,10 +954,10 @@ def generateCascadePrompts(prompts, negatives, seed, translate):
                         for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
                             # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
                             upsampled_caption = None
-                            retrys = 5
+                            retrys = 1
                             while upsampled_caption == None and retrys > 0:
-                                outputs = cascade_caption(modelLM, prompt[0], seed)
-                                upsampled_caption = json.loads(collect_cascade_response(outputs))["prompts"]
+                                outputs = cascade_caption(modelLM, prompt[0], seed + (retrys * 20))
+                                upsampled_caption = collect_cascade_response(outputs)
                                 retrys -= 1
                             seed += 1
 
@@ -972,15 +972,20 @@ def generateCascadePrompts(prompts, negatives, seed, translate):
                         clearCache()
 
                         seed = seed - len(prompts)
+
                         print()
                         for i, prompt in enumerate(prompts[:4]):
-                            cascade = ""
-                            for i, layer in enumerate(prompt[0]):
-                                cascade = f"{cascade}\n[#48a971]Layer: [#c4f129]{i+1} [#48a971]Prompt:[#494b9b]{layer}"
+                            if isinstance(prompt[0], list):
+                                cascade = ""
+                                for i, layer in enumerate(prompt[0]):
+                                    cascade = f"{cascade}\n[#48a971]Layer: [#c4f129]{i+1} [#48a971]Prompt: [#494b9b]{layer}"
 
-                            rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt layers: [#494b9b]{cascade}")
+                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt layers: [#494b9b]{cascade}")
+                            else:
+                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt failed, reverted to original: [#494b9b]{prompt[0]}")
                             seed += 1
-                        if len(prompts) > 8:
+
+                        if len(prompts) > 4:
                             rprint(f"[#48a971]Remaining prompts generated but not displayed.")
                     except:
                         rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
@@ -1059,8 +1064,10 @@ def managePrompts(prompts, negatives, loras, promptTuning):
             out_negatives.append(", ".join(negativeList))
         else:
             if promptTuning:
+                out_prompts.append(prompt)
                 out_negatives.append(f"{negative}, pixel art, blurry, mutated, deformed, borders, watermark, text")
             else:
+                out_prompts.append(prompt)
                 out_negatives.append(f"{negative}, pixel art")
 
     del loraNames
@@ -2017,7 +2024,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     gWidth = W // 8
     gHeight = H // 8
 
-    if gWidth >= 96 or gHeight >= 96:
+    if math.sqrt(gWidth * gHeight) > 104:
         resfix_weight = round(max(4, min(((((math.sqrt(gWidth * gHeight)/10) - 10) ** 3) / 3000) + 4, 7.5)) * 10)
         loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": resfix_weight})
 
@@ -2030,7 +2037,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     # Composition enhancement settings (high res fix)
     pre_steps = steps
     up_steps = 1
-    if gWidth >= 96 and gHeight >= 96 and upscale:
+    if math.sqrt(gWidth * gHeight) > 104 and upscale:
         lower = 50
         aspect = gWidth / gHeight
         gx = gWidth
@@ -2050,7 +2057,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
     negatives = [[negative]] * total_images
-    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, translate)
+    prompts, negatives = generateCascadePrompts(prompts, negatives, seed, translate)
     data = []
     negative_data = []
     for i, prompt_batch in enumerate(prompts):
@@ -2062,7 +2069,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
 
     rprint(f"\n[#48a971]Text to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
 
-    if W // 8 >= 96 and H // 8 >= 96 and upscale:
+    if math.sqrt((W // 8) * (H // 8)) > 104 and upscale:
         rprint(f"[#48a971]Pre-generating[white] composition image at [#48a971]{gWidth * 8}[white]x[#48a971]{gHeight * 8} [white]([#48a971]{(gWidth * 8) // pixelSize}[white]x[#48a971]{(gHeight * 8) // pixelSize}[white] pixels)")
 
     start_code = None
@@ -2415,7 +2422,7 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     global modelPath
 
     # High resolution adjustments for consistency
-    if math.sqrt((W // 8) * (H // 8)) >= 96:
+    if math.sqrt((W // 8) * (H // 8)) > 104:
         loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": 40})
     
         # Apply 'cropped' lora for enhanced composition at high resolution
