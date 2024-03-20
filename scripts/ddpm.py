@@ -7,6 +7,7 @@ https://github.com/CompVis/taming-transformers
 """
 
 import time, math, sys, os
+from io import StringIO
 from tqdm.auto import trange, tqdm
 import torch
 from einops import rearrange
