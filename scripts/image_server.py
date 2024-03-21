@@ -199,9 +199,17 @@ def get_precision(device, precision):
         # If GPU is nvidia 16xx use float16 and enable benchmark mode
         elif gpu_name.startswith("NVIDIA GeForce GTX 16") and torch.cuda.get_device_capability(device) == (7, 5):
             torch.backends.cudnn.benchmark = True
-            precision = "fp16"
-            model_precision = torch.float16
-            vae_precision = torch.float16
+            # Check for FP16 support
+            try:
+                _ = torch.ones(1, dtype=torch.float16).cuda()
+                precision = "fp16"
+                model_precision = torch.float16
+                vae_precision = torch.float16
+            except:
+                # fp16 is not supported, fallback to fp32
+                precision = "fp32"
+                model_precision = torch.float32
+                vae_precision = torch.float32
 
         # If GPU is nvidia 20xx disable float8 precision
         elif gpu_name.startswith("NVIDIA GeForce RTX 20"):
@@ -1228,7 +1236,7 @@ def determine_best_k(image, max_k, n_samples=10000, smooth_window=7):
         pixel_indices = pixel_indices[np.random.choice(pixel_indices.shape[0], n_samples, replace=False), :]
 
     # Compute centroids for max_k
-    quantized_image = image.quantize(colors=max_k, method=2, kmeans=max_k, dither=0)
+    quantized_image = image.quantize(colors=max_k, method=Image.Quantize.FASTOCTREE, kmeans=max_k, dither=0)
     centroids_max_k = np.array(quantized_image.getpalette()[: max_k * 3]).reshape(-1, 3)
 
     distortions = []
