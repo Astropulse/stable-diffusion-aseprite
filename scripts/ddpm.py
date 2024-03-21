@@ -9,6 +9,7 @@ https://github.com/CompVis/taming-transformers
 from functools import partial
 
 import sys, os, time, math
+from io import StringIO
 
 import numpy as np
 import pytorch_lightning as pl
@@ -927,6 +928,13 @@ class UNet(DDPM):
         cvd = CompVisDenoiser(ac)
         sigmas = get_sigmas_karras(S, device=x.device)
         x = x * sigmas[0]
+
+        # MacOS, what the fuck is wrong with you? Why do I need to print this tensor for it's value to be accurate? Fuck you. What the fuck.
+        # I'm sending it to nothing because I SHOULD NOT NEED TO SEE THE TENSOR TO HAVE IT'S NUMBERS BE RIGHT.
+        original_pipe = sys.stdout
+        sys.stdout = StringIO()
+        print(x)
+        sys.stdout = original_pipe
 
         s_in = x.new_ones([x.shape[0]]).half()
         for index in clbar(range(len(sigmas) - 1), name = "Samples", position = "first", prefixwidth = 12, suffixwidth = 28):
