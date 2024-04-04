@@ -31,6 +31,7 @@ try:
         remove_lora_for_inference,
     )
     from upsample_prompts import load_chat_pipeline, upsample_caption, collect_response, cascade_caption, collect_cascade_response
+    from oe_utils import outline_expansion, match_color
     import segmenter
     import hitherdither
 
@@ -182,6 +183,44 @@ def play(file):
             pass
 
 
+def check_commercial_gpus(gpu_name):
+    # Workstation
+    # Check ampere architecture
+    if gpu_name.startswith("NVIDIA RTX A"):
+        return "ampere"
+    
+    # Check lovelace architecture
+    elif gpu_name.startswith("NVIDIA RTX 2000"):
+        return "lovelace"
+    elif gpu_name.startswith("NVIDIA RTX 4000"):
+        return "lovelace"
+    elif gpu_name.startswith("NVIDIA RTX 4500"):
+        return "lovelace"
+    elif gpu_name.startswith("NVIDIA RTX 5000"):
+        return "lovelace"
+    elif gpu_name.startswith("NVIDIA RTX 5880"):
+        return "lovelace"
+    elif gpu_name.startswith("NVIDIA RTX 6000"):
+        return "lovelace"
+    
+    # Datacenter
+    # Check turing architecture
+    elif gpu_name.startswith("NVIDIA T4"):
+        return "turing"
+    
+    # Check ampere architecture
+    if gpu_name.startswith("NVIDIA A"):
+        return "ampere"
+    
+    # Check hopper architecture
+    if gpu_name.startswith("NVIDIA H"):
+        return "hopper"
+    
+    # Check lovelace architecture
+    elif gpu_name.startswith("NVIDIA L"):
+        return "lovelace"
+
+
 # Calculate precision mode by gpu
 def get_precision(device, precision):
     model_precision = torch.float32
@@ -216,6 +255,18 @@ def get_precision(device, precision):
             precision = "fp16"
             model_precision = torch.float16
             vae_precision = torch.float16
+
+        # If GPU is nvidia server/workstation gpu use bfloat16
+        elif check_commercial_gpus(gpu_name) in {"turing"}:
+            precision = "fp16"
+            model_precision = torch.float16
+            vae_precision = torch.float16
+
+        # If GPU is nvidia server/workstation gpu use bfloat16
+        elif check_commercial_gpus(gpu_name) in {"ampere", "hopper", "lovelace"}:
+            precision = "fp16"
+            model_precision = torch.bfloat16
+            vae_precision = torch.bfloat16
         
         # If GPU is nvidia 30xx+ allow float8 and use bfloat16
         elif gpu_name.startswith("NVIDIA GeForce"):
@@ -635,6 +686,26 @@ def load_img(image, h0, w0):
     return image
 
 
+# Resize image for preprocessing
+def resize_image(original_width, original_height, target_size = 512):
+    target_area = target_size ** 2
+    aspect_ratio = original_width / original_height
+    
+    new_width = math.sqrt(target_area * aspect_ratio)
+    new_height = math.sqrt(target_area / aspect_ratio)
+    
+    # Adjust dimensions if they exceed the original dimensions, maintaining aspect ratio
+    if new_width > original_width or new_height > original_height:
+        if original_width > original_height:
+            new_width = original_width
+            new_height = new_width / aspect_ratio
+        else:
+            new_height = original_height
+            new_width = new_height * aspect_ratio
+    
+    return (int(new_width), int(new_height))  # Returning integer values for dimensions
+
+
 # Run blip captioning for each image in a set with optional starting prompts
 def caption_images(blip, images, prompt=None):
     processor = blip["processor"]
@@ -851,237 +922,6 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
             return sd, modelFileString
 
 
-# Generate prompts with LLM
-def generateLLMPrompts(prompts, negatives, seed, translate):
-    timer = time.time()
-    global modelLM
-    global loadedDevice
-    global modelType
-    global sounds
-    global modelPath
-
-    if translate:
-        # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
-        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-        if cardMemory >= 7.6:
-            if cardMemory <= 10.2:
-                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
-            try:
-                # Load LLM for prompt upsampling
-                if modelLM == None:
-                    print("\nLoading prompt translation language model")
-                    modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
-                    play("iteration.wav")
-
-                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
-
-                if modelLM is not None:
-                    try:
-                        # Generate responses
-                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
-
-                        upsampled_captions = []
-                        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
-                            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
-                            upsampled_caption = None
-                            retrys = 5
-                            while upsampled_caption == None and retrys > 0:
-                                outputs = upsample_caption(modelLM, prompt[0], seed)
-                                upsampled_caption = collect_response(outputs)
-                                retrys -= 1
-                            seed += 1
-
-                            if upsampled_caption == None:
-                                upsampled_caption = prompt[0]
-
-                            upsampled_captions.append([upsampled_caption])
-                            play("iteration.wav")
-
-                        prompts = upsampled_captions
-                        del outputs, upsampled_caption
-                        clearCache()
-
-                        seed = seed - len(prompts)
-                        print()
-                        for i, prompt in enumerate(prompts[:8]):
-                            rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Prompt: [#494b9b]{prompt[0]}")
-                            seed += 1
-                        if len(prompts) > 8:
-                            rprint(f"[#48a971]Remaining prompts generated but not displayed.")
-                    except:
-                        rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
-            except Exception as e:
-                if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
-                elif "GPU is required" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
-                else:
-                    rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                    rprint(f"\n[#494b9b]Translation model could not be loaded.")
-        else:
-            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
-    else:
-        if modelLM is not None:
-            del modelLM
-            clearCache()
-            modelLM = None
-    
-    return prompts, negatives
-
-
-# Generate cascading prompts with LLM
-def generateCascadePrompts(prompts, negatives, seed, translate):
-    timer = time.time()
-    global modelLM
-    global loadedDevice
-    global modelType
-    global sounds
-    global modelPath
-
-    if translate:
-        # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
-        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-        if cardMemory >= 7.6:
-            if cardMemory <= 10.2:
-                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
-            try:
-                # Load LLM for prompt upsampling
-                if modelLM == None:
-                    print("\nLoading prompt translation language model")
-                    modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
-                    play("iteration.wav")
-
-                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
-
-                if modelLM is not None:
-                    try:
-                        # Generate responses
-                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
-
-                        upsampled_captions = []
-                        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
-                            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
-                            upsampled_caption = None
-                            retrys = 1
-                            while upsampled_caption == None and retrys > 0:
-                                outputs = cascade_caption(modelLM, prompt[0], seed + (retrys * 20))
-                                upsampled_caption = collect_cascade_response(outputs)
-                                retrys -= 1
-                            seed += 1
-
-                            if upsampled_caption == None:
-                                upsampled_caption = prompt[0]
-
-                            upsampled_captions.append([upsampled_caption])
-                            play("iteration.wav")
-
-                        prompts = upsampled_captions
-                        del outputs, upsampled_caption
-                        clearCache()
-
-                        seed = seed - len(prompts)
-
-                        print()
-                        for i, prompt in enumerate(prompts[:4]):
-                            if isinstance(prompt[0], list):
-                                cascade = ""
-                                for i, layer in enumerate(prompt[0]):
-                                    cascade = f"{cascade}\n[#48a971]Layer: [#c4f129]{i+1} [#48a971]Prompt: [#494b9b]{layer}"
-
-                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt layers: [#494b9b]{cascade}")
-                            else:
-                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt failed, reverted to original: [#494b9b]{prompt[0]}")
-                            seed += 1
-
-                        if len(prompts) > 4:
-                            rprint(f"[#48a971]Remaining prompts generated but not displayed.")
-                    except:
-                        rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
-            except Exception as e:
-                if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
-                elif "GPU is required" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
-                else:
-                    rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                    rprint(f"\n[#494b9b]Translation model could not be loaded.")
-        else:
-            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
-    else:
-        if modelLM is not None:
-            del modelLM
-            clearCache()
-            modelLM = None
-    
-    return prompts, negatives
-
-
-# String only manupulation of prompt and negative
-def managePrompts(prompts, negatives, loras, promptTuning):
-    # Load lora names
-    loraNames = [os.path.split(d["file"])[1] for d in loras if "file" in d]
-
-    out_prompts = []
-    out_negatives = []
-
-    negative = negatives[0]
-
-    for i, prompt in enumerate(prompts):
-        # Deal with prompt modifications
-        if modelType == "pixel" and promptTuning:
-            # Defaults
-            prefix = "pixel art"
-            suffix = "detailed"
-            negativeList = [negative, "mutated, noise, nsfw, nude, frame, film reel, snowglobe, deformed, stock image, watermark, text, signature, username"]
-
-            # Lora specific modifications
-            if any(f"{_}.pxlm" in loraNames for _ in [
-                "topdown",
-                "isometric",
-                "neogeo",
-                "nes",
-                "snes",
-                "playstation",
-                "gameboy",
-                "gameboyadvance"
-            ]):
-                prefix = "pixel"
-                suffix = ""
-            elif any(f"{_}.pxlm" in loraNames for _ in ["frontfacing", "gameicons", "flatshading"]):
-                prefix = "pixel"
-                suffix = "pixel art"
-            elif any(f"{_}.pxlm" in loraNames for _ in ["nashorkimitems"]):
-                prefix = "pixel, item"
-                suffix = ""
-                negativeList.insert(0, "vibrant, colorful")
-            elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters"]):
-                prefix = "pixel"
-                suffix = "blank background"
-
-            if any(f"{_}.pxlm" in loraNames for _ in ["1bit"]):
-                prefix = f"{prefix}, 1-bit"
-                suffix = f"{suffix}, pixel art, black and white, white background"
-                negativeList.insert(0, "color, colors")
-
-            if any(f"{_}.pxlm" in loraNames for _ in ["tiling", "tiling16", "tiling32"]):
-                prefix = f"{prefix}, texture"
-                suffix = f"{suffix}, pixel art"
-
-            # Combine all prompt modifications
-            out_prompts.append(f"{prefix}, {prompt}, {suffix}")
-            out_negatives.append(", ".join(negativeList))
-        else:
-            if promptTuning:
-                out_prompts.append(prompt)
-                out_negatives.append(f"{negative}, pixel art, blurry, mutated, deformed, borders, watermark, text")
-            else:
-                out_prompts.append(prompt)
-                out_negatives.append(f"{negative}, pixel art")
-
-    del loraNames
-    return out_prompts, out_negatives
-
-
 # K-centroid downscaling alg
 def kCentroid(image, width, height, centroids):
     image = image.convert("RGB")
@@ -1111,8 +951,57 @@ def kCentroid(image, width, height, centroids):
     return Image.fromarray(downscaled, mode="RGB")
 
 
+# K-centroid downscaling alg with outline expansion
+def kCentroidOE(image, width, height, centroids = 2):
+    image = image.convert("RGB")
+    
+    # Calculate outline expansion inputs
+    patch_size = round(math.sqrt((image.width / width) * (image.height / height)) * 0.9)
+    thickness = round(patch_size/5)
+
+    # Convert to cv2 format
+    cv2img = np.array(image)
+
+    # Perform outline expansion
+    org_img = cv2img.copy()
+    cv2img = outline_expansion(cv2img, thickness, thickness, patch_size, 9, 4)
+
+    # Convert back to PIL format
+    image = Image.fromarray(cv2img).convert("RGB")
+
+    # Downscale outline expanded image with k-centroid
+    # Create an empty array for the downscaled image
+    downscaled = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Calculate the scaling factors
+    wFactor = image.width/width
+    hFactor = image.height/height
+
+    # Iterate over each tile in the downscaled image
+    for x, y in product(range(width), range(height)):
+        # Crop the tile from the original image
+        tile = image.crop((x * wFactor, y * hFactor, (x * wFactor) + wFactor, (y * hFactor) + hFactor))
+
+        # Quantize the colors of the tile using k-means clustering
+        tile = tile.quantize(colors=centroids, method=1, kmeans=centroids).convert("RGB")
+
+        # Get the color counts and find the most common color
+        color_counts = tile.getcolors()
+        most_common_color = max(color_counts, key=lambda x: x[0])[1]
+
+        # Assign the most common color to the corresponding pixel in the downscaled image
+        downscaled[y, x, :] = most_common_color
+
+    # Color matching
+    downscaled = cv2.cvtColor(downscaled, cv2.COLOR_RGB2BGR)
+    org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
+    cv2img = match_color(downscaled, cv2.resize(org_img, (width, height), interpolation=cv2.INTER_LINEAR))
+
+    return Image.fromarray(cv2.cvtColor(cv2img, cv2.COLOR_BGR2RGB)).convert("RGB")
+
+
 # Displays graphics for k-centroid
-def kCentroidVerbose(images, width, height, centroids):
+def kCentroidVerbose(images, width, height, centroids, outline):
     timer = time.time()
     for i, image in enumerate(images):
         images[i] = decodeImage(image)
@@ -1124,7 +1013,10 @@ def kCentroidVerbose(images, width, height, centroids):
     output = []
     for image in clbar(images, name = "Processed", unit = "image", prefixwidth = 12, suffixwidth = 28):
         count += 1
-        resized_image = kCentroid(image, int(width), int(height), int(centroids))
+        if outline:
+            resized_image = kCentroidOE(image, int(width), int(height), int(centroids))
+        else:
+            resized_image = kCentroid(image, int(width), int(height), int(centroids))
 
         name = str(hash(str([image, width, height, centroids, count])))
         output.append({"name": name, "format": "png", "image": encodeImage(resized_image, "png")})
@@ -1518,6 +1410,387 @@ def rembg(images, modelpath):
     return output
 
 
+# Generate prompts with LLM
+def generateLLMPrompts(prompts, negatives, seed, translate):
+    timer = time.time()
+    global modelLM
+    global loadedDevice
+    global modelType
+    global sounds
+    global modelPath
+
+    if translate:
+        # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
+        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        if cardMemory >= 7.6:
+            if cardMemory <= 10.2:
+                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
+            try:
+                # Load LLM for prompt upsampling
+                if modelLM == None:
+                    print("\nLoading prompt translation language model")
+                    modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
+                    play("iteration.wav")
+
+                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+
+                if modelLM is not None:
+                    try:
+                        # Generate responses
+                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
+
+                        upsampled_captions = []
+                        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
+                            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
+                            upsampled_caption = None
+                            retrys = 5
+                            while upsampled_caption == None and retrys > 0:
+                                outputs = upsample_caption(modelLM, prompt[0], seed)
+                                upsampled_caption = collect_response(outputs)
+                                retrys -= 1
+                            seed += 1
+
+                            if upsampled_caption == None:
+                                upsampled_caption = prompt[0]
+
+                            upsampled_captions.append([upsampled_caption])
+                            play("iteration.wav")
+
+                        prompts = upsampled_captions
+                        del outputs, upsampled_caption
+                        clearCache()
+
+                        seed = seed - len(prompts)
+                        print()
+                        for i, prompt in enumerate(prompts[:8]):
+                            rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Prompt: [#494b9b]{prompt[0]}")
+                            seed += 1
+                        if len(prompts) > 8:
+                            rprint(f"[#48a971]Remaining prompts generated but not displayed.")
+                    except:
+                        rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
+            except Exception as e:
+                if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
+                    rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
+                elif "GPU is required" in traceback.format_exc():
+                    rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
+                else:
+                    rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                    rprint(f"\n[#494b9b]Translation model could not be loaded.")
+        else:
+            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
+    else:
+        if modelLM is not None:
+            del modelLM
+            clearCache()
+            modelLM = None
+    
+    return prompts, negatives
+
+
+# Generate cascading prompts with LLM
+def generateCascadePrompts(prompts, negatives, seed, translate):
+    timer = time.time()
+    global modelLM
+    global loadedDevice
+    global modelType
+    global sounds
+    global modelPath
+
+    if translate:
+        # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
+        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        if cardMemory >= 7.6:
+            if cardMemory <= 10.2:
+                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
+            try:
+                # Load LLM for prompt upsampling
+                if modelLM == None:
+                    print("\nLoading prompt translation language model")
+                    modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
+                    play("iteration.wav")
+
+                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+
+                if modelLM is not None:
+                    try:
+                        # Generate responses
+                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
+
+                        upsampled_captions = []
+                        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
+                            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
+                            upsampled_caption = None
+                            retrys = 1
+                            while upsampled_caption == None and retrys > 0:
+                                outputs = cascade_caption(modelLM, prompt[0], seed + (retrys * 20))
+                                upsampled_caption = collect_cascade_response(outputs)
+                                retrys -= 1
+                            seed += 1
+
+                            if upsampled_caption == None:
+                                upsampled_caption = prompt[0]
+
+                            upsampled_captions.append([upsampled_caption])
+                            play("iteration.wav")
+
+                        prompts = upsampled_captions
+                        del outputs, upsampled_caption
+                        clearCache()
+
+                        seed = seed - len(prompts)
+
+                        print()
+                        for i, prompt in enumerate(prompts[:4]):
+                            if isinstance(prompt[0], list):
+                                cascade = ""
+                                for i, layer in enumerate(prompt[0]):
+                                    cascade = f"{cascade}\n[#48a971]Layer: [#c4f129]{i+1} [#48a971]Prompt: [#494b9b]{layer}"
+
+                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt layers: [#494b9b]{cascade}")
+                            else:
+                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt failed, reverted to original: [#494b9b]{prompt[0]}")
+                            seed += 1
+
+                        if len(prompts) > 4:
+                            rprint(f"[#48a971]Remaining prompts generated but not displayed.")
+                    except:
+                        rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
+            except Exception as e:
+                if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
+                    rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
+                elif "GPU is required" in traceback.format_exc():
+                    rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
+                else:
+                    rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                    rprint(f"\n[#494b9b]Translation model could not be loaded.")
+        else:
+            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
+    else:
+        if modelLM is not None:
+            del modelLM
+            clearCache()
+            modelLM = None
+        
+        upsampled_captions = []
+        for prompt in prompts:
+            # Parse manual cascades
+            if "|" in prompt[0]:
+                upsampled_caption = [item.strip() for item in prompt[0].split("|")]
+                upsampled_captions.append([upsampled_caption])
+            else:
+                upsampled_captions.append(prompt)
+
+        prompts = upsampled_captions
+    
+    return prompts, negatives
+
+
+def correct_list_distribution(input_string):
+    split_pattern = r"\|\s*\d+(?:\.\d+)?"
+    numbers_pattern = r"\|\s*(\d+(?:\.\d+)?)"
+
+    text_parts_split = re.split(split_pattern, input_string)
+    items = [text.strip() for text in text_parts_split if text.strip()]
+
+    numerical_values_raw = re.findall(numbers_pattern, input_string)
+    percentages = [float(value) for value in numerical_values_raw]
+
+    # Determine the minimum list length based on the smallest percentage increment
+    min_percentage = min(percentages)
+    list_length = round(1 / min_percentage)
+
+    # Initialize the result list
+    result_list = [None] * list_length
+    previous_threshold = 0
+
+    for i, (item, percentage) in enumerate(zip(items, percentages + [1])):
+        # Calculate the index to start inserting the current item
+        start_index = int(previous_threshold * list_length)
+        # Calculate the index to end inserting the current item
+        end_index = int(percentage * list_length)
+
+        # Fill the range of indexes for the current item
+        for j in range(start_index, end_index):
+            result_list[j] = item
+
+        previous_threshold = percentage
+
+    return result_list
+
+
+# String only manupulation of prompt and negative
+def managePrompts(prompts, negatives, loras, promptTuning):
+    # Load lora names
+    loraNames = [os.path.split(d["file"])[1] for d in loras if "file" in d]
+
+    out_prompts = []
+    out_negatives = []
+
+    negative = negatives[0]
+
+    for i, prompt in enumerate(prompts):
+        # Deal with prompt modifications
+        if modelType == "pixel" and promptTuning:
+            # Defaults
+            prefix = "pixel art"
+            suffix = "detailed"
+            negativeList = [negative, "mutated, noise, nsfw, nude, frame, film reel, snowglobe, deformed, stock image, watermark, text, signature, username"]
+
+            # Lora specific modifications
+            if any(f"{_}.pxlm" in loraNames for _ in [
+                "topdown",
+                "isometric",
+                "neogeo",
+                "nes",
+                "snes",
+                "playstation",
+                "gameboy",
+                "gameboyadvance"
+            ]):
+                prefix = "pixel"
+                suffix = ""
+            elif any(f"{_}.pxlm" in loraNames for _ in ["frontfacing", "gameicons", "flatshading"]):
+                prefix = "pixel"
+                suffix = "pixel art"
+            elif any(f"{_}.pxlm" in loraNames for _ in ["nashorkimitems"]):
+                prefix = "pixel, item"
+                suffix = ""
+                negativeList.insert(0, "vibrant, colorful")
+            elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters"]):
+                prefix = "pixel"
+                suffix = "blank background"
+
+            if any(f"{_}.pxlm" in loraNames for _ in ["1bit"]):
+                prefix = f"{prefix}, 1-bit"
+                suffix = f"{suffix}, pixel art, black and white, white background"
+                negativeList.insert(0, "color, colors")
+
+            if any(f"{_}.pxlm" in loraNames for _ in ["tiling", "tiling16", "tiling32"]):
+                prefix = f"{prefix}, texture"
+                suffix = f"{suffix}, pixel art"
+
+            # Combine all prompt modifications
+            out_prompts.append(f"{prefix}, {prompt}, {suffix}")
+            out_negatives.append(", ".join(negativeList))
+        else:
+            if promptTuning:
+                out_prompts.append(prompt)
+                out_negatives.append(f"{negative}, pixel art, blurry, mutated, deformed, borders, watermark, text")
+            else:
+                out_prompts.append(prompt)
+                out_negatives.append(f"{negative}, pixel art")
+
+    del loraNames
+    return out_prompts, out_negatives
+
+
+# Generate the text embeddings for prompts
+def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes):
+    # Create conditioning values for each batch, then unload the text encoder
+    negative_conditioning = []
+    conditioning = []
+    shape = []
+    # Use the specified precision scope
+    modelCS.to(device)
+    condBatch = batch
+    condCount = 0
+    for run in range(runs):
+        # Compute conditioning tokens using prompt and negative
+        condBatch = min(condBatch, total_images - condCount)
+
+        text_embed_batch = []
+        neg_text_embed_batch = []
+
+        # Pull original text embedding for comparison
+
+        prompts = data[condCount]
+
+        #prompts = ["pixel, a raven with mountains in the background",
+        #           "pixel, a raven on a branch with mountains and bright sky in the background",
+        #           "pixel, a tough raven standing on a tree branch in a field with rocky jagged mountains in the background, clear sky",
+        #           "pixel, a tough raven with glowing eyes standing on a tree branch in a mountain valley, with northern mountains in the background and puffy clouds in the sky, clear sky, crisp day",
+        #           "pixel, an old tough raven with gleaming eyes on a withered old tree branch with big scenic northern mountains in the background and a meadow in the foreground, the raven is highly detailed and the mountains are rocky and jagged"]
+
+        #prompts = ["pixel, a futuristic city at twilight",
+        #            "pixel, a city where traditional architecture meets neon skyscrapers, with a grand river reflecting lights",
+        #            "pixel, a cityscape with neon-lit skyscrapers and holographic ads, floating vehicles, and a river reflecting vibrant lights",
+        #            "pixel, a bustling city with neon skyscrapers, traditional buildings, holographic ads, floating vehicles, and green rooftops, all under a twilight sky",
+        #            "pixel, a vibrant futuristic city at twilight, merging traditional architecture with neon-lit skyscrapers. The city buzzes with holographic advertisements, floating vehicles, and drones. A grand river reflects the lively lights, while green rooftops and vertical gardens add nature to the urban landscape. A colossal digital clock tower, with a face of ever-changing patterns, stands as a beacon under a sky transitioning to night, the first stars appearing."]
+        
+
+
+        negatives = negative_data[condCount]
+
+        for prompt in prompts:
+            text_embed = modelCS.get_learned_conditioning(prompt)
+
+            # Run through all attributes
+            slider_embed = torch.zeros_like(text_embed)
+            for slider in attributes["sliders"]:
+                # Extract pure positive attribute
+                token_embed = modelCS.get_learned_conditioning(slider["token"])
+
+                # Check for negative attribute
+                if "neg_token" in slider:
+                    # Extract pure negative attribute
+                    neg_token_embed = modelCS.get_learned_conditioning(slider["neg_token"])
+                else:
+                    # Add blank embed as negative, reduce weight to compensate
+                    neg_token_embed = modelCS.get_learned_conditioning("")
+                    slider['neg_token'] = f"not-{slider['token']}"
+
+                # Calculate difference between positive and negative attributes
+                diff = token_embed - neg_token_embed
+
+                # Sort and collect only the most different weights according to variance
+                concept = torch.argsort(diff[:, :5, :].abs().sum(axis=1).squeeze(0), descending=True)
+
+                # Calculate the elbow point in the differences between concepts
+                gradients = concept[:-1] - concept[1:]
+                second_derivatives = gradients[:-1] - gradients[1:]
+                elbow_point = (torch.argmax(torch.abs(second_derivatives)) + 1) // 4
+
+                # Slice irrelevant weights from concept embedding
+                concept = concept[:elbow_point]
+
+                # Mask and multiply by weight
+                concept_mask = torch.zeros_like(diff)
+                concept_mask[:, :, concept] = slider['weight']
+                diff = diff * concept_mask
+                slider_embed += diff
+                rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
+            
+            # Apply attributes to text embedding
+            text_embed += slider_embed
+
+            # Repeat conditioning for batches
+            text_embed = text_embed.repeat(condBatch, 1, 1)
+            text_embed_batch.append(text_embed)
+
+        for negative in negatives:
+            neg_text_embed = modelCS.get_learned_conditioning(negative)
+
+            # Repeat conditioning for batches
+            neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
+            neg_text_embed_batch.append(neg_text_embed)
+
+        conditioning.append(text_embed_batch)
+        negative_conditioning.append(neg_text_embed_batch)
+        shape.append([condBatch, 4, gHeight, gWidth])
+        condCount += condBatch
+
+    # Move modelCS to CPU if necessary to free up GPU memory
+    if device == "cuda":
+        mem = torch.cuda.memory_allocated() / 1e6
+        modelCS.to("cpu")
+        # Wait until memory usage decreases
+        while torch.cuda.memory_allocated() / 1e6 >= mem:
+            time.sleep(1)
+
+    return conditioning, negative_conditioning, shape
+
+
 # Render image from latent usinf Tiny Autoencoder or clustered Pixel VAE
 def render(modelTA, modelPV, samples_ddim, device, precision, H, W, pixelSize, pixelvae, tilingX, tilingY, loras, post):
     precision, model_precision, vae_precision = get_precision(device, precision)
@@ -1640,6 +1913,7 @@ def paletteGen(prompt, colors, seed, device, precision):
     return [{"name": f"palette{name}", "format": "png", "image": encodeImage(palette.convert("RGB"), "png")}]
 
 
+# Wave pattern for HSV -> RGB lora conversion
 def continuous_pattern_wave(x):
     """
     Continuous function that matches the given pattern:
@@ -1664,6 +1938,7 @@ def continuous_pattern_wave(x):
     return pattern[0]
 
 
+# Apply composition loras
 def manageComposition(lighting, composition, loras):
     lecoPath = os.path.join(modelPath, "LECO")
 
@@ -1714,25 +1989,7 @@ def manageComposition(lighting, composition, loras):
     return loras
 
 
-def resize_image(original_width, original_height, target_size = 512):
-    target_area = target_size ** 2
-    aspect_ratio = original_width / original_height
-    
-    new_width = math.sqrt(target_area * aspect_ratio)
-    new_height = math.sqrt(target_area / aspect_ratio)
-    
-    # Adjust dimensions if they exceed the original dimensions, maintaining aspect ratio
-    if new_width > original_width or new_height > original_height:
-        if original_width > original_height:
-            new_width = original_width
-            new_height = new_width / aspect_ratio
-        else:
-            new_height = original_height
-            new_width = new_height * aspect_ratio
-    
-    return (int(new_width), int(new_height))  # Returning integer values for dimensions
-
-
+# Prepare variables for controlnet inference
 def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
     raw_loras = []
     
@@ -1886,111 +2143,129 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
             conditioning, negative_conditioning, shape = get_text_embed(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
 
         return conditioning, negative_conditioning, encoded_latent, steps, scale, runs, data, negative_data, seeds, batch, raw_loras
+
+
+# Run controlnet inference
+def neural_inference(modelFileString, title, controlnets, prompt, negative, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
+    timer = time.time()
+    global modelCS
+    global modelTA
+    global modelPV
+
+    if autocaption and init_img is not None:
+        global modelBLIP
+        if modelBLIP is None:
+            global modelPath
+            modelBLIP = load_blip(os.path.join(modelPath, "BLIP"))
+
+        if modelBLIP is not None:
+            processor = modelBLIP["processor"]
+            model = modelBLIP["model"]
+
+            blip_image = init_img.resize(resize_image(init_img.width, init_img.height, 512), resample=Image.Resampling.BILINEAR)
+            if prompt is not None:
+                inputs = processor(blip_image, prompt, return_tensors="pt")
+            else:
+                inputs = processor(blip_image, return_tensors="pt")
+
+            rprint(f"\n[#48a971]Vision model [/]generating image description")
+            prompt = remove_repeated_words(processor.decode(model.generate(**inputs, max_new_tokens=30)[0], skip_special_tokens=True))
+            rprint(f"[#48a971]Caption: [#494b9b]{prompt}")
     
+    conditioning, negative_conditioning, image_embed, steps, scale, runs, data, negative_data, seeds, batch, raw_loras = prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, init_img)
 
-def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes):
-    # Create conditioning values for each batch, then unload the text encoder
-    negative_conditioning = []
-    conditioning = []
-    shape = []
-    # Use the specified precision scope
-    modelCS.to(device)
-    condBatch = batch
-    condCount = 0
-    for run in range(runs):
-        # Compute conditioning tokens using prompt and negative
-        condBatch = min(condBatch, total_images - condCount)
+    title = title.lower().replace(' ', '_')
 
-        text_embed_batch = []
-        neg_text_embed_batch = []
+    rprint(f"[#48a971]Patching model for controlnet")
+    model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
 
-        # Pull original text embedding for comparison
+    precision, model_precision, vae_precision = get_precision(device, precision)
 
-        prompts = data[condCount]
+    with torch.no_grad():
+        base_count = 0
+        output = []
 
-        #prompts = ["pixel, a raven with mountains in the background",
-        #           "pixel, a raven on a branch with mountains and bright sky in the background",
-        #           "pixel, a tough raven standing on a tree branch in a field with rocky jagged mountains in the background, clear sky",
-        #           "pixel, a tough raven with glowing eyes standing on a tree branch in a mountain valley, with northern mountains in the background and puffy clouds in the sky, clear sky, crisp day",
-        #           "pixel, an old tough raven with gleaming eyes on a withered old tree branch with big scenic northern mountains in the background and a meadow in the foreground, the raven is highly detailed and the mountains are rocky and jagged"]
+        # Iterate over the specified number of iterations
+        for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
+            batch = min(batch, total_images - base_count)
 
-        #prompts = ["pixel, a futuristic city at twilight",
-        #            "pixel, a city where traditional architecture meets neon skyscrapers, with a grand river reflecting lights",
-        #            "pixel, a cityscape with neon-lit skyscrapers and holographic ads, floating vehicles, and a river reflecting vibrant lights",
-        #            "pixel, a bustling city with neon skyscrapers, traditional buildings, holographic ads, floating vehicles, and green rooftops, all under a twilight sky",
-        #            "pixel, a vibrant futuristic city at twilight, merging traditional architecture with neon-lit skyscrapers. The city buzzes with holographic advertisements, floating vehicles, and drones. A grand river reflects the lively lights, while green rooftops and vertical gardens add nature to the urban landscape. A colossal digital clock tower, with a face of ever-changing patterns, stands as a beacon under a sky transitioning to night, the first stars appearing."]
-        
-
-
-        negatives = negative_data[condCount]
-
-        for prompt in prompts:
-            text_embed = modelCS.get_learned_conditioning(prompt)
-
-            # Run through all attributes
-            slider_embed = torch.zeros_like(text_embed)
-            for slider in attributes["sliders"]:
-                # Extract pure positive attribute
-                token_embed = modelCS.get_learned_conditioning(slider["token"])
-
-                # Check for negative attribute
-                if "neg_token" in slider:
-                    # Extract pure negative attribute
-                    neg_token_embed = modelCS.get_learned_conditioning(slider["neg_token"])
-                else:
-                    # Add blank embed as negative, reduce weight to compensate
-                    neg_token_embed = modelCS.get_learned_conditioning("")
-                    slider['neg_token'] = f"not-{slider['token']}"
-
-                # Calculate difference between positive and negative attributes
-                diff = token_embed - neg_token_embed
-
-                # Sort and collect only the most different weights according to variance
-                concept = torch.argsort(diff[:, :5, :].abs().sum(axis=1).squeeze(0), descending=True)
-
-                # Calculate the elbow point in the differences between concepts
-                gradients = concept[:-1] - concept[1:]
-                second_derivatives = gradients[:-1] - gradients[1:]
-                elbow_point = (torch.argmax(torch.abs(second_derivatives)) + 1) // 4
-
-                # Slice irrelevant weights from concept embedding
-                concept = concept[:elbow_point]
-
-                # Mask and multiply by weight
-                concept_mask = torch.zeros_like(diff)
-                concept_mask[:, :, concept] = slider['weight']
-                diff = diff * concept_mask
-                slider_embed += diff
-                rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
+            for step, samples_ddim in enumerate(sample_cldm(
+                model_patcher,
+                cldm_cond,
+                cldm_uncond,
+                seed,
+                steps, # steps,
+                scale + 2.0, # cfg,
+                "ddim", # sampler,
+                batch, # batch size
+                W,
+                H,
+                image_embed[run], # initial latent for img2img
+                strength, # denoise strength
+                "normal" # scheduler
+            )):
+                if preview:
+                    # Render and send image previews
+                    displayOut = []
+                    for i in range(batch):
+                        x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
+                        name = str(seed+i)
+                        displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                    yield [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}},
+                           {"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
             
-            # Apply attributes to text embedding
-            text_embed += slider_embed
+            for i in range(batch):
+                x_sample_image, post = render(modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
+                if total_images > 1 and (base_count + 1) < total_images:
+                    play("iteration.wav")
 
-            # Repeat conditioning for batches
-            text_embed = text_embed.repeat(condBatch, 1, 1)
-            text_embed_batch.append(text_embed)
+                seeds.append(str(seed))
+                name = [data[i], negative_data[i], translate, promptTuning, W, H, steps, scale, device, loras, pixelvae, seed]
+                if init_img is not None:
+                    name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
+                name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
+                output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
-        for negative in negatives:
-            neg_text_embed = modelCS.get_learned_conditioning(negative)
+                seed += 1
+                base_count += 1
+            # Delete the samples to free up memory
+            del samples_ddim
 
-            # Repeat conditioning for batches
-            neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
-            neg_text_embed_batch.append(neg_text_embed)
+        if mapColors and init_img is not None:
+            numColors = 256
+            palette_img = init_img.resize((W // 8, H // 8), resample=Image.Resampling.NEAREST)
+            palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+            numColors = len(palette_img.getcolors(numColors))
 
-        conditioning.append(text_embed_batch)
-        negative_conditioning.append(neg_text_embed_batch)
-        shape.append([condBatch, 4, gHeight, gWidth])
-        condCount += condBatch
+            # Extract palette colors
+            palette = np.concatenate([x[1] for x in palette_img.getcolors(numColors)]).tolist()
 
-    # Move modelCS to CPU if necessary to free up GPU memory
-    if device == "cuda":
-        mem = torch.cuda.memory_allocated() / 1e6
-        modelCS.to("cpu")
-        # Wait until memory usage decreases
-        while torch.cuda.memory_allocated() / 1e6 >= mem:
-            time.sleep(1)
+            # Create a new palette image
+            tempPaletteImage = Image.new("P", (256, 1))
+            tempPaletteImage.putpalette(palette)
 
-    return conditioning, negative_conditioning, shape
+            # Convert generated image to reduced input image palette
+            temp_output = output
+            output = []
+            for image in temp_output:
+                tempImage = image["image"]
+                # Perform quantization without dithering
+                image_indexed = tempImage.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
+                if post:
+                    numColors = determine_best_k(image_indexed, 96)
+                    image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+
+                output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
+        elif post:
+            output = palettizeOutput(output)
+
+        final = []
+        for image in output:
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+        play("batch.wav")
+        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
+        unload_cldm()
+        yield ["", {"action": "display_image", "type": title, "value": {"images": final, "prompts": data, "negatives": negative_data}}]
 
 
 # Generate image from text prompt
@@ -2270,128 +2545,6 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
-
-
-def neural_inference(modelFileString, title, controlnets, prompt, negative, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
-    timer = time.time()
-    global modelCS
-    global modelTA
-    global modelPV
-
-    if autocaption and init_img is not None:
-        global modelBLIP
-        if modelBLIP is None:
-            global modelPath
-            modelBLIP = load_blip(os.path.join(modelPath, "BLIP"))
-
-        if modelBLIP is not None:
-            processor = modelBLIP["processor"]
-            model = modelBLIP["model"]
-
-            blip_image = init_img.resize(resize_image(init_img.width, init_img.height, 512), resample=Image.Resampling.BILINEAR)
-            if prompt is not None:
-                inputs = processor(blip_image, prompt, return_tensors="pt")
-            else:
-                inputs = processor(blip_image, return_tensors="pt")
-
-            rprint(f"\n[#48a971]Vision model [/]generating image description")
-            prompt = remove_repeated_words(processor.decode(model.generate(**inputs, max_new_tokens=30)[0], skip_special_tokens=True))
-            rprint(f"[#48a971]Caption: [#494b9b]{prompt}")
-    
-    conditioning, negative_conditioning, image_embed, steps, scale, runs, data, negative_data, seeds, batch, raw_loras = prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, init_img)
-
-    title = title.lower().replace(' ', '_')
-
-    rprint(f"[#48a971]Patching model for controlnet")
-    model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
-
-    precision, model_precision, vae_precision = get_precision(device, precision)
-
-    with torch.no_grad():
-        base_count = 0
-        output = []
-
-        # Iterate over the specified number of iterations
-        for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
-            batch = min(batch, total_images - base_count)
-
-            for step, samples_ddim in enumerate(sample_cldm(
-                model_patcher,
-                cldm_cond,
-                cldm_uncond,
-                seed,
-                steps, # steps,
-                scale + 2.0, # cfg,
-                "ddim", # sampler,
-                batch, # batch size
-                W,
-                H,
-                image_embed[run], # initial latent for img2img
-                strength, # denoise strength
-                "normal" # scheduler
-            )):
-                if preview:
-                    # Render and send image previews
-                    displayOut = []
-                    for i in range(batch):
-                        x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
-                        name = str(seed+i)
-                        displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                    yield [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}},
-                           {"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
-            
-            for i in range(batch):
-                x_sample_image, post = render(modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
-                if total_images > 1 and (base_count + 1) < total_images:
-                    play("iteration.wav")
-
-                seeds.append(str(seed))
-                name = [data[i], negative_data[i], translate, promptTuning, W, H, steps, scale, device, loras, pixelvae, seed]
-                if init_img is not None:
-                    name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
-                name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
-                output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
-
-                seed += 1
-                base_count += 1
-            # Delete the samples to free up memory
-            del samples_ddim
-
-        if mapColors and init_img is not None:
-            numColors = 256
-            palette_img = init_img.resize((W // 8, H // 8), resample=Image.Resampling.NEAREST)
-            palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-            numColors = len(palette_img.getcolors(numColors))
-
-            # Extract palette colors
-            palette = np.concatenate([x[1] for x in palette_img.getcolors(numColors)]).tolist()
-
-            # Create a new palette image
-            tempPaletteImage = Image.new("P", (256, 1))
-            tempPaletteImage.putpalette(palette)
-
-            # Convert generated image to reduced input image palette
-            temp_output = output
-            output = []
-            for image in temp_output:
-                tempImage = image["image"]
-                # Perform quantization without dithering
-                image_indexed = tempImage.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
-                if post:
-                    numColors = determine_best_k(image_indexed, 96)
-                    image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-
-                output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
-        elif post:
-            output = palettizeOutput(output)
-
-        final = []
-        for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
-        play("batch.wav")
-        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
-        unload_cldm()
-        yield ["", {"action": "display_image", "type": title, "value": {"images": final, "prompts": data, "negatives": negative_data}}]
 
 
 # Generate image from image+text prompt
@@ -3459,6 +3612,7 @@ async def server(websocket):
                                 values["width"],
                                 values["height"],
                                 values["centroids"],
+                                values["outline"]
                             )
                             await websocket.send(json.dumps({"action": "returning", "type": "kcentroid", "value": {"images": images}}))
                         except Exception as e:
