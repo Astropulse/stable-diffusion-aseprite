@@ -185,6 +185,10 @@ def play(file):
 
 def check_commercial_gpus(gpu_name):
     # Workstation
+    # Check turing architecture
+    if gpu_name.startswith("NVIDIA Quadro RTX"):
+        return "turing"
+
     # Check ampere architecture
     if gpu_name.startswith("NVIDIA RTX A"):
         return "ampere"
@@ -219,6 +223,8 @@ def check_commercial_gpus(gpu_name):
     # Check lovelace architecture
     elif gpu_name.startswith("NVIDIA L"):
         return "lovelace"
+    
+    return None
 
 
 # Calculate precision mode by gpu
@@ -256,7 +262,7 @@ def get_precision(device, precision):
             model_precision = torch.float16
             vae_precision = torch.float16
 
-        # If GPU is nvidia server/workstation gpu use bfloat16
+        # If GPU is nvidia server/workstation gpu use float16
         elif check_commercial_gpus(gpu_name) in {"turing"}:
             precision = "fp16"
             model_precision = torch.float16
@@ -673,9 +679,9 @@ def load_img(image, h0, w0):
 
     # Color adjustments to account for Tiny Autoencoder
     contrast = ImageEnhance.Contrast(image)
-    image_contrast = contrast.enhance(0.78)
+    image_contrast = contrast.enhance(0.95)
     saturation = ImageEnhance.Color(image_contrast)
-    image_saturation = saturation.enhance(0.833)
+    image_saturation = saturation.enhance(0.9)
 
     # Convert the image to a numpy array of float32 values in the range [0, 1], transpose it, and convert it to a PyTorch tensor
     image = np.array(image_saturation).astype(np.float32) / 255
@@ -887,12 +893,24 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
         # Set precision and device settings
         precision, model_precision, vae_precision = get_precision(device, precision)
 
+        global modelFS
+        if optimized:
+            modelFS = None
+        else:
+            vaePath = os.path.join(modelPath, "VAE")
+            vae = load_model_from_config(f"{os.path.join(vaePath, 'VAE.pxlm')}")
+            modelFS = instantiate_from_config(config.model_first_stage)
+            modelFS.eval()
+            _, _ = modelFS.load_state_dict(vae, strict=False)
+
         # Handle float16 and float32 conditions
         if device == "cuda" and precision != "fp8":
             if split:
                 model.to(model_precision)
             modelCS.to(model_precision)
             modelTA.to(vae_precision)
+            if not optimized:
+                modelFS.to(vae_precision)
             precision = model_precision
         # Handle float8 condition
         elif device == "cuda":
@@ -902,6 +920,8 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
                 if isinstance(layer, torch.nn.Linear):
                     layer.to(model_precision)
             modelTA.to(vae_precision)
+            if not optimized:
+                modelFS.to(vae_precision)
             precision = model_precision
             rprint(f"Applied [#48a971]torch.fp8[/] to model")
 
@@ -1056,6 +1076,36 @@ def pixelDetect(image: Image):
 
     # Resize input image using kCentroid with the calculated horizontal and vertical factors
     return kCentroid(image, round(image.width / np.median(hspacing)), round(image.height / np.median(vspacing)), 2)
+
+
+# Uses FFT to detect image frequency
+def compute_fft_simple(image):
+
+    # Load the image and convert to grayscale
+    img = image.convert('L')
+    
+    # Convert image to numpy array
+    img_array = np.array(img)
+
+    # Compute the 2-dimensional FFT
+    fft_result = np.fft.fft2(img_array)
+    magnitude_spectrum = np.abs(fft_result)
+
+    # Find minimum value
+    is_below_min = magnitude_spectrum <= np.min(magnitude_spectrum)
+
+    # Calculate horizontal tiles
+    diffs = np.diff(is_below_min.astype(int), axis=1)
+    section_starts = (diffs == 1).sum(axis=1)
+    sections_h = np.median(section_starts) + 1
+
+    # Calculate vertical tiles
+    diffs = np.diff(is_below_min.astype(int), axis=0)
+    section_starts = (diffs == 1).sum(axis=0)
+    sections_v = np.median(section_starts) + 1
+
+    # Resize the image accordingly
+    return image.resize((round(img.width / sections_h), round(img.height / sections_v)), resample=Image.Resampling.NEAREST)
 
 
 # Displays graphics for pixelDetect
@@ -1289,11 +1339,14 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
                     paletteImage = image
 
             numColors = len(paletteImage.getcolors(16777216))
+            if numColors > 256:
+                paletteImage = paletteImage.quantize(colors=256, method=2, kmeans=256, dither=0).convert("RGB")
+                numColors = len(paletteImage.getcolors(16777216))
 
             if strength > 0 and dithering > 0:
                 for _ in clbar([image], name="Palettizing", position="first", prefixwidth=12, suffixwidth=28):
                     # Adjust the image gamma
-                    image = adjust_gamma(image, 1.0 - (0.02 * strength))
+                    image_gama = adjust_gamma(image, 1.0 - (0.02 * strength))
 
                     # Extract palette colors
                     palette = [x[1] for x in paletteImage.getcolors(16777216)]
@@ -1302,13 +1355,13 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
                         warnings.simplefilter("ignore")
                         # Perform ordered dithering using Bayer matrix
                         palette = hitherdither.palette.Palette(palette)
-                        image_indexed = hitherdither.ordered.bayer.bayer_dithering(image, palette, [threshold, threshold, threshold], order=dithering).convert("RGB")
+                        image_indexed = hitherdither.ordered.bayer.bayer_dithering(image_gama, palette, [threshold, threshold, threshold], order=dithering).convert("RGB")
             else:
                 # Extract palette colors
                 palette = np.concatenate([x[1] for x in paletteImage.getcolors(16777216)]).tolist()
 
                 # Create a new palette image
-                tempPaletteImage = Image.new("P", (256, 1))
+                tempPaletteImage = Image.new("P", (len(palette) // 3, 1))
                 tempPaletteImage.putpalette(palette)
 
                 # Perform quantization without dithering
@@ -1322,7 +1375,7 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
                     image_indexed = image.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
 
                     # Adjust the image gamma
-                    image = adjust_gamma(image, 1.0 - (0.03 * strength))
+                    image_gama = adjust_gamma(image, 1.0 - (0.03 * strength))
 
                     # Extract palette colors
                     palette = [x[1] for x in image_indexed.getcolors(16777216)]
@@ -1331,7 +1384,7 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
                         warnings.simplefilter("ignore")
                         # Perform ordered dithering using Bayer matrix
                         palette = hitherdither.palette.Palette(palette)
-                        image_indexed = hitherdither.ordered.bayer.bayer_dithering(image, palette, [threshold, threshold, threshold], order=dithering).convert("RGB")
+                        image_indexed = hitherdither.ordered.bayer.bayer_dithering(image_gama, palette, [threshold, threshold, threshold], order=dithering).convert("RGB")
 
             else:
                 # Perform quantization without dithering
@@ -1644,6 +1697,7 @@ def managePrompts(prompts, negatives, loras, promptTuning):
                 "neogeo",
                 "nes",
                 "snes",
+                "segagenesis",
                 "playstation",
                 "gameboy",
                 "gameboyadvance"
@@ -1657,9 +1711,15 @@ def managePrompts(prompts, negatives, loras, promptTuning):
                 prefix = "pixel, item"
                 suffix = ""
                 negativeList.insert(0, "vibrant, colorful")
-            elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters"]):
+            elif any(f"{_}.pxlm" in loraNames for _ in ["portraits"]):
+                prefix = "pixel, portrait"
+                suffix = ""
+            elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters", "gamecharactersretro"]):
                 prefix = "pixel"
                 suffix = "blank background"
+            elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharactersanime"]):
+                prefix = "pixel art"
+                suffix = "detailed, blank background"
 
             if any(f"{_}.pxlm" in loraNames for _ in ["1bit"]):
                 prefix = f"{prefix}, 1-bit"
@@ -1792,7 +1852,7 @@ def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeig
 
 
 # Render image from latent usinf Tiny Autoencoder or clustered Pixel VAE
-def render(modelTA, modelPV, samples_ddim, device, precision, H, W, pixelSize, pixelvae, tilingX, tilingY, loras, post):
+def render(modelFS, modelTA, modelPV, samples_ddim, device, precision, H, W, pixelSize, pixelvae, tilingX, tilingY, loras, post):
     precision, model_precision, vae_precision = get_precision(device, precision)
     if pixelvae:
         # Pixel clustering mode, lower threshold means bigger clusters
@@ -1802,27 +1862,44 @@ def render(modelTA, modelPV, samples_ddim, device, precision, H, W, pixelSize, p
         x_sample = x_sample[0].cpu().numpy()
     else:
         try:
-            try:
-                x_sample = modelTA.decoder(samples_ddim.to(device).to(vae_precision))
-            except:
-                x_sample = modelTA.decoder(samples_ddim.to("mps").to(vae_precision))
-            x_sample = torch.clamp((x_sample.cpu().float()), min = 0.0, max = 1.0)
-            x_sample = x_sample.cpu().movedim(1, -1)
-            x_sample = 255.0 * x_sample[0].cpu().numpy()
-            x_sample = np.clip(x_sample, 0, 255).astype(np.uint8)
+            if modelFS is None:
+                try:
+                    x_sample = modelTA.decoder(samples_ddim.to(device).to(vae_precision))
+                except:
+                    x_sample = modelTA.decoder(samples_ddim.to("mps").to(vae_precision))
+                x_sample = torch.clamp((x_sample.cpu().float()), min = 0.0, max = 1.0)
+                x_sample = x_sample.cpu().movedim(1, -1)
+                x_sample = 255.0 * x_sample[0].cpu().numpy()
+                x_sample = np.clip(x_sample, 0, 255).astype(np.uint8)
 
-            # Denoise the generated image
-            x_sample = cv2.fastNlMeansDenoisingColored(x_sample, None, 6, 6, 3, 21)
+                # Denoise the generated image
+                x_sample = cv2.fastNlMeansDenoisingColored(x_sample, None, 6, 6, 3, 21)
 
-            # Color adjustments to account for Tiny Autoencoder
-            contrast = ImageEnhance.Contrast(Image.fromarray(x_sample))
-            x_sample_contrast = contrast.enhance(1.3)
-            saturation = ImageEnhance.Color(x_sample_contrast)
-            x_sample_saturation = saturation.enhance(1.2)
+                # Color adjustments to account for Tiny Autoencoder
+                contrast = ImageEnhance.Contrast(Image.fromarray(x_sample))
+                x_sample_contrast = contrast.enhance(1.2)
+                saturation = ImageEnhance.Color(x_sample_contrast)
+                x_sample_saturation = saturation.enhance(1.15)
 
-            # Convert back to NumPy array if necessary
-            x_sample = np.array(x_sample_saturation)
+                # Convert back to NumPy array if necessary
+                x_sample = np.array(x_sample_saturation)
+            else:
+                modelFS.to(device)
+                # Decode the samples using the first stage of the model
+                try:
+                    x_sample = modelFS.decode_first_stage(samples_ddim.to(device).to(vae_precision))
+                except:
+                    x_sample = modelFS.decode_first_stage(samples_ddim.to("mps").to(vae_precision))
+                x_sample = torch.clamp((x_sample.cpu().float() + 1.0) / 2.0, min = 0.0, max = 1.0)
+                x_sample = x_sample.cpu().movedim(1, -1)
+                x_sample = 255.0 * x_sample[0].cpu().numpy()
 
+                if device == "cuda":
+                    mem = torch.cuda.memory_allocated(device=device) / 1e6
+                    modelFS.to("cpu")
+                    # Wait until memory usage decreases
+                    while torch.cuda.memory_allocated(device=device) / 1e6 >= mem:
+                        time.sleep(1)
             
         except:
             if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
@@ -1843,7 +1920,7 @@ def render(modelTA, modelPV, samples_ddim, device, precision, H, W, pixelSize, p
     elif x_sample_image.width < W // pixelSize and x_sample_image.height < H // pixelSize:
         x_sample_image = x_sample_image.resize((W, H), resample=Image.Resampling.NEAREST)
 
-    if not pixelvae:
+    if not pixelvae and False:
         # Sharpen to enhance details lost by decoding
         x_sample_image_sharp = x_sample_image.filter(ImageFilter.SHARPEN)
         alpha = 0.13
@@ -2149,6 +2226,7 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
 def neural_inference(modelFileString, title, controlnets, prompt, negative, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
     timer = time.time()
     global modelCS
+    global modelFS
     global modelTA
     global modelPV
 
@@ -2215,7 +2293,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
                            {"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
             
             for i in range(batch):
-                x_sample_image, post = render(modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
+                x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
                 if total_images > 1 and (base_count + 1) < total_images:
                     play("iteration.wav")
 
@@ -2232,6 +2310,11 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
             del samples_ddim
 
         if mapColors and init_img is not None:
+            # Get cv2 format image for color matching
+            org_img = np.array(init_img.resize((W // 8, H // 8), resample=Image.Resampling.BICUBIC))
+            org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
+
+            # Get palette for indexing
             numColors = 256
             palette_img = init_img.resize((W // 8, H // 8), resample=Image.Resampling.NEAREST)
             palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
@@ -2249,8 +2332,15 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
             output = []
             for image in temp_output:
                 tempImage = image["image"]
-                # Perform quantization without dithering
-                image_indexed = tempImage.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
+
+                # Match colors loosely
+                cv2_temp = cv2.cvtColor(np.array(tempImage), cv2.COLOR_RGB2BGR)
+                color_matched_img = match_color(cv2_temp, org_img)
+                image_indexed = Image.fromarray(cv2.cvtColor(color_matched_img, cv2.COLOR_BGR2RGB)).convert("RGB")
+                
+                # Index image to actual colors
+                image_indexed = image_indexed.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
+
                 if post:
                     numColors = determine_best_k(image_indexed, 96)
                     image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
@@ -2359,6 +2449,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     sampler = "pxlcm"
 
     global model
+    global modelFS
     global modelTA
     global modelPV
 
@@ -2509,7 +2600,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
 
                 # Render final images in batch
                 for i in range(batch):
-                    x_sample_image, post = render(modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, tilingX, tilingY, loras, post)
+                    x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, tilingX, tilingY, loras, post)
 
                     if total_images > 1 and (base_count + 1) < total_images:
                         play("iteration.wav")
@@ -2622,6 +2713,7 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
 
     global model
     global modelCS
+    global modelFS
     global modelTA
     global modelPV
 
@@ -2754,7 +2846,7 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
 
                 # Render final images in batch
                 for i in range(batch):
-                    x_sample_image, post = render(modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, tilingX, tilingY, loras, post)
+                    x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, tilingX, tilingY, loras, post)
 
                     if total_images > 1 and (base_count + 1) < total_images:
                         play("iteration.wav")
@@ -2894,6 +2986,7 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
 
     global model
     global modelCS
+    global modelFS
     global modelTA
     global modelPV
 
@@ -2949,7 +3042,7 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
                     ):
                         pass
 
-                    render(modelTA, modelPV, samples_ddim, 0, device, precision, testSize, testSize, 8, pixelvae, False, False, ["None"], False)
+                    render(modelFS, modelTA, modelPV, samples_ddim, 0, device, precision, testSize, testSize, 8, pixelvae, False, False, ["None"], False)
 
                     # Delete the samples to free up memory
                     del samples_ddim
