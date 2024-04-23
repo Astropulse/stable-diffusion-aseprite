@@ -8,12 +8,12 @@ try:
     import numpy as np
     from random import randint
     from omegaconf import OmegaConf
-    from PIL import Image, ImageEnhance, ImageFilter
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
     import cv2
     from itertools import product
     from einops import rearrange
     from pytorch_lightning import seed_everything
-    from transformers import BlipProcessor, BlipForConditionalGeneration
+    from transformers import BlipProcessor, BlipForConditionalGeneration, AutoImageProcessor, AutoModelForDepthEstimation
     from typing import Optional
     from safetensors.torch import load_file
     from cryptography.fernet import Fernet
@@ -33,6 +33,7 @@ try:
     from upsample_prompts import load_chat_pipeline, upsample_caption, collect_response, cascade_caption, collect_cascade_response
     from oe_utils import outline_expansion, match_color
     import segmenter
+    import preprocessors.pose_util as pose_util
     import hitherdither
 
     # Import PyTorch functions
@@ -693,14 +694,20 @@ def load_img(image, h0, w0):
 
 
 # Resize image for preprocessing
-def resize_image(original_width, original_height, target_size = 512):
+def resize_image(image, target_size):
+    # Calculate the target area
     target_area = target_size ** 2
+    
+    # Get original dimensions
+    original_width, original_height = image.size
+    
     aspect_ratio = original_width / original_height
     
+    # Calculate new dimensions
     new_width = math.sqrt(target_area * aspect_ratio)
     new_height = math.sqrt(target_area / aspect_ratio)
     
-    # Adjust dimensions if they exceed the original dimensions, maintaining aspect ratio
+    # Adjust dimensions to not exceed original sizes while maintaining aspect ratio
     if new_width > original_width or new_height > original_height:
         if original_width > original_height:
             new_width = original_width
@@ -709,7 +716,91 @@ def resize_image(original_width, original_height, target_size = 512):
             new_height = original_height
             new_width = new_height * aspect_ratio
     
-    return (int(new_width), int(new_height))  # Returning integer values for dimensions
+    # Resize the image using bilinear interpolation
+    image = image.resize((int(math.floor(new_width)), int(math.floor(new_height))), Image.Resampling.BILINEAR)
+    
+    return image
+
+
+# Use FFT to extract image high frequencies
+def extract_high_frequencies(image, cutoff=0.1, percentile=85):
+    # Load the image and convert to grayscale
+    img = image.convert('L')
+    img_array = np.array(img)
+
+    # Compute the 2-dimensional FFT
+    fft_result = np.fft.fft2(img_array)
+    fft_shifted = np.fft.fftshift(fft_result)
+    
+    # Create a low-pass filter mask
+    rows, cols = img_array.shape
+    crow, ccol = rows // 2 , cols // 2  # Center point
+    low_pass_mask = np.zeros((rows, cols), dtype=int)
+    low_pass_mask[crow-int(crow*cutoff):crow+int(crow*cutoff), ccol-int(ccol*cutoff):ccol+int(ccol*cutoff)] = 1
+
+    # Create high-pass filter by subtracting low-pass filter from an all-ones matrix
+    high_pass_mask = 1 - low_pass_mask
+
+    # Apply the high-pass filter to the shifted FFT
+    filtered_fft = fft_shifted * high_pass_mask
+    
+    # Inverse FFT shift and inverse FFT
+    ifft_shifted = np.fft.ifftshift(filtered_fft)
+    img_back = np.fft.ifft2(ifft_shifted)
+    img_back = np.log(1 + np.abs(img_back))
+
+    img_back = 255 * (img_back - img_back.min()) / (img_back.max() - img_back.min())
+    threshold = np.percentile(img_back, percentile)
+
+    final_img = np.where(img_back >= threshold, 255, 0)
+    return Image.fromarray(final_img.astype(np.uint8))
+
+
+# Use OpenPose for pose estimation
+def pose_estimation(image, model_path):
+    scaled_img = resize_image(image, 512)
+    img_array = np.array(scaled_img)
+    # Load the estimation models
+    body_estimation = pose_util.Body(model_path)
+
+    # Perform pose estimation
+    candidate, subset = body_estimation(img_array)
+    canvas = np.zeros(img_array.shape, dtype=np.uint8)
+    canvas = Image.fromarray(pose_util.draw_bodypose(canvas, candidate, subset))
+
+    pose_data = {
+        'candidate': candidate.tolist(),
+        'subset': subset.tolist()
+    }
+
+    return canvas, pose_data
+
+
+# Use DepthAnything for depth estimation
+def depth_estimation(image, model_path):
+    image = image.convert("RGB")
+    image_processor = AutoImageProcessor.from_pretrained(model_path)
+    model = AutoModelForDepthEstimation.from_pretrained(model_path)
+
+    # prepare image for the model
+    inputs = image_processor(images=image, return_tensors="pt")
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+        predicted_depth = outputs.predicted_depth
+
+    # interpolate to original size
+    prediction = torch.nn.functional.interpolate(
+        predicted_depth.unsqueeze(1),
+        size=image.size[::-1],
+        mode="bicubic",
+        align_corners=False,
+    )
+
+    # visualize the prediction
+    output = prediction.squeeze().cpu().numpy()
+    formatted = (output * 255 / np.max(output)).astype("uint8")
+    return Image.fromarray(formatted)
 
 
 # Run blip captioning for each image in a set with optional starting prompts
@@ -2143,7 +2234,8 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
     precision, model_precision, vae_precision = get_precision(device, precision)
     precision_scope = autocast(device, precision, model_precision)
 
-    init_image.to(vae_precision)
+    if image is not None:
+        init_image.to(vae_precision)
 
     # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
     decryptedFiles = []
@@ -2240,7 +2332,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
             processor = modelBLIP["processor"]
             model = modelBLIP["model"]
 
-            blip_image = init_img.resize(resize_image(init_img.width, init_img.height, 512), resample=Image.Resampling.BILINEAR)
+            blip_image = resize_image(init_img, 512)
             if prompt is not None:
                 inputs = processor(blip_image, prompt, return_tensors="pt")
             else:
@@ -3509,6 +3601,116 @@ async def server(websocket):
                                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
                             await websocket.send(json.dumps({"action": "error"}))
+                    case "cntxt2img":
+                        try:
+                            title = "ControlNet Text to Image"
+
+                            # Extract parameters from the message
+                            values = message["value"]
+                            modelData = values["model"]
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Loading model"}}))
+                            
+                            load_model(
+                                modelData["file"],
+                                "scripts/v1-inference.yaml",
+                                modelData["device"],
+                                modelData["precision"],
+                                modelData["optimized"],
+                                False
+                            )
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generating..."}}))
+                            
+                            # Load controlnets and images
+                            controlnets = []
+                            modelPath, _ = os.path.split(modelData["file"])
+                            for i, controlnet in enumerate(values["controlnets"]):
+                                if controlnet["enabled"] == True:
+                                    if values["images"][i] == "none":
+                                        rprint(f"[#ab333d]Attempted to load {controlnet['model']} ControlNet, but no image was found. Disable ControlNets with no input to avoid this warning.")
+                                    else:
+                                        # Decode input image
+                                        init_img = decodeImage(values["images"][i])
+                                        if init_img.width <= 1 or init_img.height <= 1:
+                                            rprint(f"[#ab333d]Attempted to load {controlnet['model']} ControlNet, but no image was found. Disable ControlNets with no input to avoid this warning.")
+                                        else:
+                                            # Resize image to output dimensions
+                                            image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.BILINEAR).convert("RGB")
+
+                                            if controlnet["model"] == "Sketch":
+                                                if controlnet["process"]:
+                                                    image = extract_high_frequencies(image)
+                                                else:
+                                                    image = np.array(ImageOps.invert(image.convert("L").convert("RGB")))
+                                                    filtered = np.where(image >= 128, 255, 0)
+                                                    image = Image.fromarray(filtered.astype(np.uint8))
+
+                                            elif controlnet["process"]:
+                                                if controlnet["model"] == "Depth":
+                                                    depthPath = os.path.join(modelPath, "PREPROCESSOR", "DEPTH")
+                                                    image = depth_estimation(image, depthPath)
+                                                elif controlnet["model"] == "Pose":
+                                                    prePath = os.path.join(modelPath, "PREPROCESSOR")
+                                                    image, _ = pose_estimation(image, os.path.join(prePath, "POSE_OpenPose.pth"))
+                                                    if np.all(np.array(image) == 0):
+                                                        rprint(f"[#ab333d]No pose detected in input image.")
+                                                elif controlnet["model"] == "Tile":
+                                                    image = image.filter(ImageFilter.GaussianBlur(radius=2))
+
+                                            rprint(f"[#494b9b]Loading [#48a971]{controlnet['model']} [#494b9b]ControlNet with [#48a971]{controlnet['weight']}% [#494b9b]strength")
+
+                                            netPath = os.path.join(modelPath, "CONTROLNET")
+                                            controlnets.append({"model_file": os.path.join(netPath, f"{controlnet['model']}.safetensors"), "image": image, "weight": controlnet["weight"]/100})
+                                        
+
+                            for result in neural_inference(
+                                modelData["file"],
+                                title,
+                                controlnets,
+                                values["prompt"],
+                                values["negative"],
+                                False,
+                                values["translate"],
+                                values["prompt_tuning"],
+                                values["width"],
+                                values["height"],
+                                values["pixel_size"],
+                                values["steps"],
+                                values["scale"],
+                                1.0,
+                                values["lighting"],
+                                values["composition"],
+                                values["seed"],
+                                values["generations"],
+                                values["max_batch_size"],
+                                modelData["device"],
+                                modelData["precision"],
+                                values["loras"],
+                                values["send_progress"],
+                                values["use_pixelvae"],
+                                False,
+                                values["post_process"]
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    await websocket.send(json.dumps(result[1]))
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            if "SSLCertVerificationError" in traceback.format_exc():
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
+                                if modelLM is not None:
+                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
+                            else:
+                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
                     case "img2img":
                         try:
                             # Extract parameters from the message
@@ -3571,6 +3773,113 @@ async def server(websocket):
                             #    rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
                             #elif ("cannot reshape tensor of 0 elements" in traceback.format_exc()):
                             #    rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
+                            else:
+                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "cnimg2img":
+                        try:
+                            title = "ControlNet Image to Image"
+
+                            # Extract parameters from the message
+                            values = message["value"]
+                            modelData = values["model"]
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Loading model"}}))
+                            
+                            load_model(
+                                modelData["file"],
+                                "scripts/v1-inference.yaml",
+                                modelData["device"],
+                                modelData["precision"],
+                                modelData["optimized"],
+                                False
+                            )
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generating..."}}))
+                            
+                            # Load controlnets and images
+                            controlnets = []
+                            for i, controlnet in enumerate(values["controlnets"]):
+                                if controlnet["enabled"] == True:
+                                    # Decode input image
+                                    init_img = decodeImage(values["images"][i])
+                                    if init_img.width <= 1 or init_img.height <= 1:
+                                        rprint(f"[#ab333d]Attempted to load {controlnet['model']} ControlNet, but no image was found. Disable ControlNets with no input to avoid this warning.")
+                                    else:
+                                        # Resize image to output dimensions
+                                        image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.BILINEAR).convert("RGB")
+
+                                        if controlnet["model"] == "Sketch":
+                                            if controlnet["process"]:
+                                                image = extract_high_frequencies(image)
+                                            else:
+                                                image = np.array(ImageOps.invert(image.convert("L").convert("RGB")))
+                                                filtered = np.where(image >= 128, 255, 0)
+                                                image = Image.fromarray(filtered.astype(np.uint8))
+
+                                        elif controlnet["process"]:
+                                            if controlnet["model"] == "Depth":
+                                                depthPath = os.path.join(modelPath, "PREPROCESSOR", "DEPTH")
+                                                image = depth_estimation(image, depthPath)
+                                            elif controlnet["model"] == "Pose":
+                                                prePath = os.path.join(modelPath, "PREPROCESSOR")
+                                                image, _ = pose_estimation(image, os.path.join(prePath, "POSE_OpenPose.pth"))
+                                                if np.all(np.array(image) == 0):
+                                                    rprint(f"[#ab333d]No pose detected in input image.")
+                                            elif controlnet["model"] == "Tile":
+                                                image = image.filter(ImageFilter.GaussianBlur(radius=2))
+
+                                        rprint(f"[#494b9b]Loading [#48a971]{controlnet['model']} [#494b9b]ControlNet with [#48a971]{controlnet['weight']}% [#494b9b]strength")
+
+                                        modelPath, _ = os.path.split(modelData["file"])
+                                        netPath = os.path.join(modelPath, "CONTROLNET")
+                                        controlnets.append({"model_file": os.path.join(netPath, f"{controlnet['model']}.safetensors"), "image": image, "weight": controlnet["weight"]/100})
+
+                            for result in neural_inference(
+                                modelData["file"],
+                                title,
+                                controlnets,
+                                values["prompt"],
+                                values["negative"],
+                                False,
+                                values["translate"],
+                                values["prompt_tuning"],
+                                values["width"],
+                                values["height"],
+                                values["pixel_size"],
+                                values["steps"],
+                                values["scale"],
+                                values["strength"]/100,
+                                values["lighting"],
+                                values["composition"],
+                                values["seed"],
+                                values["generations"],
+                                values["max_batch_size"],
+                                modelData["device"],
+                                modelData["precision"],
+                                values["loras"],
+                                values["send_progress"],
+                                values["use_pixelvae"],
+                                False,
+                                values["post_process"],
+                                decodeImage(values["images"][len(values["images"])-1])
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    await websocket.send(json.dumps(result[1]))
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            if "SSLCertVerificationError" in traceback.format_exc():
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
+                                if modelLM is not None:
+                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
                             else:
                                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
