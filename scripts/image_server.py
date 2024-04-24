@@ -124,7 +124,7 @@ system_models = ["quality", "resfix", "adapter", "crop", "detail", "brightness",
 global sounds
 sounds = False
 
-expectedVersion = "10.5.0"
+expectedVersion = "11.0.0"
 
 global maxSize
 
