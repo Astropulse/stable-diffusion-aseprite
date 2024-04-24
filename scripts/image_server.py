@@ -3651,6 +3651,8 @@ async def server(websocket):
                                                 if controlnet["model"] == "Depth":
                                                     depthPath = os.path.join(modelPath, "PREPROCESSOR", "DEPTH")
                                                     image = depth_estimation(image, depthPath)
+                                                    if np.all(np.array(image) == 0):
+                                                        rprint(f"[#ab333d]No depth map could be extracted from input image.")
                                                 elif controlnet["model"] == "Pose":
                                                     prePath = os.path.join(modelPath, "PREPROCESSOR")
                                                     image, _ = pose_estimation(image, os.path.join(prePath, "POSE_OpenPose.pth"))
