@@ -909,6 +909,7 @@ SCHEDULER_NAMES = [
     "normal",
     "karras",
     "exponential",
+    "kl_optional",
     "sgm_uniform",
     "simple",
     "ddim_uniform",
@@ -925,6 +926,12 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps):
         )
     elif scheduler_name == "exponential":
         sigmas = k_diffusion_sampling.get_sigmas_exponential(
+            n=steps,
+            sigma_min=float(model.model_sampling.sigma_min),
+            sigma_max=float(model.model_sampling.sigma_max),
+        )
+    elif scheduler_name == "kl_optimal":
+        sigmas = k_diffusion_sampling.get_sigmas_ays(
             n=steps,
             sigma_min=float(model.model_sampling.sigma_min),
             sigma_max=float(model.model_sampling.sigma_max),

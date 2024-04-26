@@ -1785,6 +1785,7 @@ def managePrompts(prompts, negatives, loras, promptTuning):
             if any(f"{_}.pxlm" in loraNames for _ in [
                 "topdown",
                 "isometric",
+                "modern",
                 "neogeo",
                 "nes",
                 "snes",
@@ -1802,9 +1803,6 @@ def managePrompts(prompts, negatives, loras, promptTuning):
                 prefix = "pixel, item"
                 suffix = ""
                 negativeList.insert(0, "vibrant, colorful")
-            elif any(f"{_}.pxlm" in loraNames for _ in ["portraits"]):
-                prefix = "pixel, portrait"
-                suffix = ""
             elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters", "gamecharactersretro"]):
                 prefix = "pixel"
                 suffix = "blank background"
@@ -2322,6 +2320,14 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
     global modelTA
     global modelPV
 
+    # Check gpu availability
+    if device == "cuda" and not torch.cuda.is_available():
+        if torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+            rprint(f"\n[#ab333d]GPU is not responding, loading model in CPU mode")
+
     if autocaption and init_img is not None:
         global modelBLIP
         if modelBLIP is None:
@@ -2372,7 +2378,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
                 H,
                 image_embed[run], # initial latent for img2img
                 strength, # denoise strength
-                "normal" # scheduler
+                "kl_optimal" # scheduler
             )):
                 if preview:
                     # Render and send image previews
@@ -3803,6 +3809,7 @@ async def server(websocket):
                             
                             # Load controlnets and images
                             controlnets = []
+                            modelPath, _ = os.path.split(modelData["file"])
                             for i, controlnet in enumerate(values["controlnets"]):
                                 if controlnet["enabled"] == True:
                                     # Decode input image

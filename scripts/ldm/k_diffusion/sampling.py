@@ -7,6 +7,7 @@ import torchsde
 from tqdm.auto import trange, tqdm
 
 from . import utils
+from io import StringIO
 
 import time, os, math, sys
 import numpy as np
@@ -133,6 +134,15 @@ def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cpu'):
     return append_zero(sigmas).to(device)
 
 
+def get_sigmas_ays(n, sigma_min, sigma_max, device='cpu'):
+    alpha_min = torch.arctan(torch.tensor(sigma_min, device=device))
+    alpha_max = torch.arctan(torch.tensor(sigma_max, device=device))
+    sigmas = torch.empty((n+1,), device=device)
+    for i in range(n+1):
+        sigmas[i] = torch.tan((i/n) * alpha_min + (1.0-i/n) * alpha_max)
+    return sigmas.to(device)
+
+
 def get_sigmas_exponential(n, sigma_min, sigma_max, device='cpu'):
     """Constructs an exponential noise schedule."""
     sigmas = torch.linspace(math.log(sigma_max), math.log(sigma_min), n, device=device).exp()
@@ -238,6 +248,14 @@ class BrownianTreeNoiseSampler:
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
     extra_args = {} if extra_args is None else extra_args
+
+    # MacOS, what the fuck is wrong with you? Why do I need to print this tensor for it's value to be accurate? Fuck you. What the fuck.
+    # I'm sending it to nothing because I SHOULD NOT NEED TO SEE THE TENSOR TO HAVE IT'S NUMBERS BE RIGHT.
+    original_pipe = sys.stdout
+    sys.stdout = StringIO()
+    print(x)
+    sys.stdout = original_pipe
+    
     s_in = x.new_ones([x.shape[0]])
     
     for i in clbar(range(len(sigmas) - 1), name = "Samples", position = "first", prefixwidth = 12, suffixwidth = 28):

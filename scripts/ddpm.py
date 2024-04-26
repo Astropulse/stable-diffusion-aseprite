@@ -172,6 +172,14 @@ def get_sigmas_karras(n, sigma_min=0.1, sigma_max=10, rho=7.0, device='cpu'):
     sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
     return append_zero(sigmas).to(device)
 
+def get_sigmas_ays(n, sigma_min=0.0, sigma_max=10, device='cpu'):
+    alpha_min = torch.arctan(torch.tensor(sigma_min, device=device))
+    alpha_max = torch.arctan(torch.tensor(sigma_max, device=device))
+    sigmas = torch.empty((n+1,), device=device)
+    for i in range(n+1):
+        sigmas[i] = torch.tan((i/n) * alpha_min + (1.0-i/n) * alpha_max)
+    return sigmas.to(device)
+
 class DDPM(pl.LightningModule):
     # classic DDPM with Gaussian diffusion, in image space
     def __init__(
@@ -926,7 +934,7 @@ class UNet(DDPM):
     ):
         extra_args = {} if extra_args is None else extra_args
         cvd = CompVisDenoiser(ac)
-        sigmas = get_sigmas_karras(S, device=x.device)
+        sigmas = get_sigmas_ays(S, device=x.device)
         x = x * sigmas[0]
 
         # MacOS, what the fuck is wrong with you? Why do I need to print this tensor for it's value to be accurate? Fuck you. What the fuck.
