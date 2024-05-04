@@ -415,19 +415,21 @@ def __replacementConv2DConvForward(self, input: Tensor, weight: Tensor, bias: Op
 
 
 # Patch Conv2d layers in the given models for asymmetric padding
-def patch_tiling(tilingX, tilingY, model, modelTA, modelPV):
+def patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV):
     # Patch for relevant models
     patch_conv_asymmetric(model, tilingX, tilingY)
+    patch_conv_asymmetric(modelFS, tilingX, tilingY)
     patch_conv_asymmetric(modelTA, tilingX, tilingY)
     patch_conv_asymmetric(modelPV.model, tilingX, tilingY)
 
     if tilingX or tilingY:
         # Print a message indicating the direction(s) patched for tiling
         rprint("[#494b9b]Patched for tiling in the [#48a971]" + "X" * tilingX + "[#494b9b] and [#48a971]" * (tilingX and tilingY) + "Y" * tilingY + "[#494b9b] direction" + "s" * (tilingX and tilingY))
+        rprint('[#ab333d]Forced tiling may cause unexpected results at small sizes, use of the "Tiling" modifier is recommended instead.')
+    return model, modelFS, modelTA, modelPV
 
-    return model, modelTA, modelPV
 
-
+# Attempts to remove words repeated at the end of a string
 def remove_repeated_words(string):
     # Splitting the string by spaces to preserve original punctuation
     parts = string.split()
@@ -2551,9 +2553,6 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     global modelTA
     global modelPV
 
-    # Patch tiling for model and modelTA
-    model, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelTA, modelPV)
-
     # Set the precision scope based on device and precision
     precision, model_precision, vae_precision = get_precision(device, precision)
     precision_scope = autocast(device, precision, model_precision)
@@ -2610,6 +2609,9 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
         else:
             loadedLoras.append(None)
 
+    # Patch tiling for model and modelTA
+    model, modelFS, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV)
+    
     seeds = []
 
     # Concepts containing attributes and weights (can contain negative attributes or not).
@@ -2815,9 +2817,6 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     global modelTA
     global modelPV
 
-    # Patch tiling for model and modelTA
-    model, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelTA, modelPV)
-
     # Set the precision scope based on device and precision
     precision, model_precision, vae_precision = get_precision(device, precision)
     precision_scope = autocast(device, precision, model_precision)
@@ -2872,6 +2871,9 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
                 rprint(f"[#494b9b]Using [#48a971]{os.path.splitext(loraName)[0]} [#494b9b]LoRA with [#48a971]{loraPair['weight']}% [#494b9b]strength")
         else:
             loadedLoras.append(None)
+
+    # Patch tiling for model and modelTA
+    model, modelFS, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV)
 
     seeds = []
     strength = max(0.001, min(strength, 1.0))
