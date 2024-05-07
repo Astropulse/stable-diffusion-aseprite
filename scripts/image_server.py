@@ -2209,7 +2209,8 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
         loras.append({"file": os.path.join(lecoPath, "contrast.leco"), "weight": 200})
 
     # Resolution adapter
-    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
+    if math.sqrt((H // 8) * (W // 8)) < 60 and pixelSize == 8:
+        loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
@@ -2505,7 +2506,8 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     loras = manageComposition(lighting, composition, loras)
 
     # Resolution adapter
-    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
+    if math.sqrt(gWidth * gHeight) < 60 and pixelSize == 8:
+        loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Composition enhancement settings (high res fix)
     pre_steps = steps
@@ -2793,7 +2795,8 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     loras = manageComposition(lighting, composition, loras)
 
     # Resolution adapter
-    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
+    if math.sqrt((W // 8) * (H // 8)) < 60 and pixelSize == 8:
+        loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
