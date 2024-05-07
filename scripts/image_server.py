@@ -17,9 +17,10 @@ try:
     from typing import Optional
     from safetensors.torch import load_file
     from cryptography.fernet import Fernet
+    import psutil
 
     # Import built libraries
-    from ldm.util import instantiate_from_config, max_tile
+    from ldm.util import instantiate_from_config, max_tile, make_beta_schedule, make_ddim_timesteps
     from optimization.pixelvae import load_pixelvae_model
     from optimization.taesd import TAESD
     from lora import (
@@ -30,6 +31,8 @@ try:
         register_lora_for_inference,
         remove_lora_for_inference,
     )
+    from conditioning.model import ELLA, T5TextEmbedder
+    from ddpm import get_sigmas_ays
     from upsample_prompts import load_chat_pipeline, upsample_caption, collect_response, cascade_caption, collect_cascade_response
     from oe_utils import outline_expansion, match_color
     import segmenter
@@ -100,6 +103,11 @@ modelSettings = None
 global model
 # Conditioning (clip)
 global modelCS
+
+global modelELLA
+modelELLA = None
+global modelT5
+modelT5 = None
 # VAE (Unused, replaced by TAE)
 global modelFS
 # TAE
@@ -856,6 +864,72 @@ def load_blip(path):
         return None
 
 
+def load_ella(device, precision):
+    global modelELLA
+    global modelPath
+    # Set precision and device settings
+    precision, model_precision, vae_precision = get_precision(device, precision)
+    ellaPath = os.path.join(modelPath, 'ELLA', "ella1-5.safetensors")
+
+    try:
+        if modelELLA is None:
+            modelELLA = ELLA().to(device, vae_precision)
+            ella_state_dict = load_model_from_config(ellaPath)
+            modelELLA.load_state_dict(ella_state_dict)
+        else:
+            modelELLA.to(device, vae_precision)
+    except Exception as e:
+        rprint(f"[#ab333d]{traceback.format_exc()}\n\nELLA could not be loaded, this may indicate a model has not been downloaded fully, or you have run out of memory.")
+        modelELLA = None
+
+
+def load_T5(device, precision):
+    global modelT5
+    global modelPath
+    # Set precision and device settings
+    precision, model_precision, vae_precision = get_precision(device, precision)
+    t5Path = os.path.join(modelPath, 'T5XL')
+
+    try:
+        if modelT5 is None:
+            timer = time.time()
+            rprint(f"Loading T5 text encoder to [#c4f129]{device}")
+            modelT5 = T5TextEmbedder(t5Path).to(device, vae_precision)
+            play("iteration.wav")
+            rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+        else:
+            modelT5.to(device, vae_precision)
+    except Exception as e:
+        rprint(f"[#ab333d]{traceback.format_exc()}\n\nT5 could not be loaded, this may indicate a model has not been downloaded fully, or you have run out of memory.")
+
+
+def unload_ella(device):
+    global modelELLA
+    if device == "cuda" and modelELLA is not None:
+        mem = torch.cuda.memory_allocated() / 1e6
+        modelELLA.to("cpu")
+        # Wait until memory usage decreases
+        while torch.cuda.memory_allocated() / 1e6 >= mem:
+            time.sleep(1)
+
+
+def unload_T5(device):
+    global modelT5
+    cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
+    if cpuMemoryUnused > 8:
+        if device == "cuda" and modelT5 is not None:
+            mem = torch.cuda.memory_allocated() / 1e6
+            modelT5.to("cpu")
+            # Wait until memory usage decreases
+            while torch.cuda.memory_allocated() / 1e6 >= mem:
+                time.sleep(1)
+    else:
+        del modelT5
+        clearCache()
+        modelT5 = None
+        rprint(f"[#48a971]Unloaded T5 text encoder to save memory")
+        
+
 # Helper for loading model files
 def load_model_from_config(model, verbose=False):
     # Load the model's state dictionary from the specified file
@@ -1567,7 +1641,10 @@ def generateLLMPrompts(prompts, negatives, seed, translate):
 
     if translate:
         # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
-        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        if loadedDevice == "cuda" and torch.cuda.is_available():
+            cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        else:
+            cardMemory = 0
         if cardMemory >= 7.6:
             if cardMemory <= 10.2:
                 rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
@@ -1643,9 +1720,12 @@ def generateCascadePrompts(prompts, negatives, seed, translate):
     global sounds
     global modelPath
 
-    if translate:
+    if translate and loadedDevice != "cpu":
         # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
-        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        if loadedDevice == "cuda" and torch.cuda.is_available():
+            cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        else:
+            cardMemory = 0
         if cardMemory >= 7.6:
             if cardMemory <= 10.2:
                 rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
@@ -1779,9 +1859,9 @@ def managePrompts(prompts, negatives, loras, promptTuning):
         # Deal with prompt modifications
         if modelType == "pixel" and promptTuning:
             # Defaults
-            prefix = "pixel art"
-            suffix = "detailed"
-            negativeList = [negative, "mutated, noise, nsfw, nude, frame, film reel, snowglobe, deformed, stock image, watermark, text, signature, username"]
+            prefix = "pixel, pixel art"
+            suffix = ""
+            negativeList = [negative, "nude, nsfw, border, signature"]
 
             # Lora specific modifications
             if any(f"{_}.pxlm" in loraNames for _ in [
@@ -1796,30 +1876,30 @@ def managePrompts(prompts, negatives, loras, promptTuning):
                 "gameboy",
                 "gameboyadvance"
             ]):
-                prefix = "pixel"
+                prefix = "pixel, pixel art"
                 suffix = ""
             elif any(f"{_}.pxlm" in loraNames for _ in ["frontfacing", "gameicons", "flatshading"]):
-                prefix = "pixel"
-                suffix = "pixel art"
+                prefix = "pixel, pixel art"
+                suffix = ""
             elif any(f"{_}.pxlm" in loraNames for _ in ["nashorkimitems"]):
-                prefix = "pixel, item"
+                prefix = "pixel art, pixel, item"
                 suffix = ""
                 negativeList.insert(0, "vibrant, colorful")
             elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters", "gamecharactersretro"]):
-                prefix = "pixel"
+                prefix = "pixel, pixel art"
                 suffix = "blank background"
             elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharactersanime"]):
-                prefix = "pixel art"
-                suffix = "detailed, blank background"
+                prefix = "pixel, pixel art"
+                suffix = "blank background"
 
             if any(f"{_}.pxlm" in loraNames for _ in ["1bit"]):
                 prefix = f"{prefix}, 1-bit"
-                suffix = f"{suffix}, pixel art, black and white, white background"
+                suffix = f"{suffix}, black and white, white background"
                 negativeList.insert(0, "color, colors")
 
             if any(f"{_}.pxlm" in loraNames for _ in ["tiling", "tiling16", "tiling32"]):
                 prefix = f"{prefix}, texture"
-                suffix = f"{suffix}, pixel art"
+                suffix = f"{suffix}"
 
             # Combine all prompt modifications
             out_prompts.append(f"{prefix}, {prompt}, {suffix}")
@@ -1836,8 +1916,21 @@ def managePrompts(prompts, negatives, loras, promptTuning):
     return out_prompts, out_negatives
 
 
+def timestep(sigma):
+    log_sigma = sigma.log()
+
+    betas = torch.tensor(make_beta_schedule("linear", 1000))
+    alphas = 1. - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
+
+    log_sigmas = sigmas.log().float()
+    dists = log_sigma.to(log_sigmas.device) - log_sigmas[:, None]
+    return dists.abs().argmin(dim=0).view(sigma.shape).to(sigma.device)
+
+
 # Generate the text embeddings for prompts
-def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes):
+def get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes):
     # Create conditioning values for each batch, then unload the text encoder
     negative_conditioning = []
     conditioning = []
@@ -1856,26 +1949,12 @@ def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeig
         # Pull original text embedding for comparison
 
         prompts = data[condCount]
-
-        #prompts = ["pixel, a raven with mountains in the background",
-        #           "pixel, a raven on a branch with mountains and bright sky in the background",
-        #           "pixel, a tough raven standing on a tree branch in a field with rocky jagged mountains in the background, clear sky",
-        #           "pixel, a tough raven with glowing eyes standing on a tree branch in a mountain valley, with northern mountains in the background and puffy clouds in the sky, clear sky, crisp day",
-        #           "pixel, an old tough raven with gleaming eyes on a withered old tree branch with big scenic northern mountains in the background and a meadow in the foreground, the raven is highly detailed and the mountains are rocky and jagged"]
-
-        #prompts = ["pixel, a futuristic city at twilight",
-        #            "pixel, a city where traditional architecture meets neon skyscrapers, with a grand river reflecting lights",
-        #            "pixel, a cityscape with neon-lit skyscrapers and holographic ads, floating vehicles, and a river reflecting vibrant lights",
-        #            "pixel, a bustling city with neon skyscrapers, traditional buildings, holographic ads, floating vehicles, and green rooftops, all under a twilight sky",
-        #            "pixel, a vibrant futuristic city at twilight, merging traditional architecture with neon-lit skyscrapers. The city buzzes with holographic advertisements, floating vehicles, and drones. A grand river reflects the lively lights, while green rooftops and vertical gardens add nature to the urban landscape. A colossal digital clock tower, with a face of ever-changing patterns, stands as a beacon under a sky transitioning to night, the first stars appearing."]
-        
-
-
         negatives = negative_data[condCount]
 
         for prompt in prompts:
             text_embed = modelCS.get_learned_conditioning(prompt)
 
+            # UNUSED
             # Run through all attributes
             slider_embed = torch.zeros_like(text_embed)
             for slider in attributes["sliders"]:
@@ -1938,6 +2017,100 @@ def get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeig
         # Wait until memory usage decreases
         while torch.cuda.memory_allocated() / 1e6 >= mem:
             time.sleep(1)
+
+    return conditioning, negative_conditioning, shape
+
+
+# Generate the text embeddings for prompts
+def get_text_embed_t5(data, negative_data, t5_device, device, precision):
+    # Create conditioning values for each batch, then unload the text encoder
+    negative_conditioning = []
+    conditioning = []
+    # Use the specified precision scope
+    modelCS.to(device)
+    load_T5(t5_device, precision)
+
+    # Compute conditioning tokens using prompt and negative
+    prompts = data[0]
+    negatives = negative_data[0]
+
+    prompt = prompts[-1]
+    if type(prompt) == list:
+        prompt = prompt[0]
+    negative = negatives[-1]
+    if type(negative) == list:
+        negative = negative[0]
+
+    text_embed_clip = modelCS.get_learned_conditioning(prompt)
+    text_embed_t5 = modelT5(prompt).to(device)
+    conditioning = [text_embed_t5, text_embed_clip]
+
+    neg_text_embed_clip = modelCS.get_learned_conditioning(negative)
+    neg_text_embed_t5 = modelT5(negative).to(device)
+    negative_conditioning = [neg_text_embed_t5, neg_text_embed_clip]
+
+    del text_embed_t5
+    del text_embed_clip
+    del neg_text_embed_t5
+    del neg_text_embed_clip
+
+    # Move modelCS to CPU if necessary to free up GPU memory
+    if device == "cuda":
+        mem = torch.cuda.memory_allocated() / 1e6
+        modelCS.to("cpu")
+        # Wait until memory usage decreases
+        while torch.cuda.memory_allocated() / 1e6 >= mem:
+            time.sleep(1)
+    
+    unload_T5(t5_device)
+    clearCache()
+
+    return conditioning, negative_conditioning
+
+
+# Generate the text embeddings for prompts
+def t5_to_clip(embed, negative_embed, steps, runs, batch, total_images, gWidth, gHeight, device, precision):
+    # Create conditioning values for each batch, then unload the text encoder
+    negative_conditioning = []
+    conditioning = []
+    shape = []
+    # Use the specified precision scope
+    load_ella(device, precision)
+    sigmas = get_sigmas_ays(steps)
+    condBatch = batch
+    condCount = 0
+    for run in range(runs):
+        # Compute conditioning tokens using prompt and negative
+        condBatch = min(condBatch, total_images - condCount)
+
+        text_embed_batch = []
+        neg_text_embed_batch = []
+
+        for sigma in sigmas[:-1]:
+            ts = timestep(sigma)
+            text_embed = torch.cat((modelELLA(ts, embed[0]), embed[1]), 1)
+
+            # Repeat conditioning for batches
+            text_embed = text_embed.repeat(condBatch, 1, 1)
+            text_embed_batch.append(text_embed)
+
+            # Negative
+            neg_text_embed = torch.cat((modelELLA(ts, negative_embed[0]), negative_embed[1]), 1)
+
+            # Repeat conditioning for batches
+            neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
+            neg_text_embed_batch.append(neg_text_embed)
+
+        del text_embed
+        del neg_text_embed
+
+        conditioning.append(text_embed_batch)
+        negative_conditioning.append(neg_text_embed_batch)
+        shape.append([condBatch, 4, gHeight, gWidth])
+        condCount += condBatch
+
+    unload_ella(device)
+    clearCache()
 
     return conditioning, negative_conditioning, shape
 
@@ -2160,6 +2333,8 @@ def manageComposition(lighting, composition, loras):
 # Prepare variables for controlnet inference
 def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
     raw_loras = []
+
+    use_ella = True
     
     # Check gpu availability
     if device == "cuda" and not torch.cuda.is_available():
@@ -2309,7 +2484,23 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
         attributes = {"sliders": []}
 
         with precision_scope:
-            conditioning, negative_conditioning, shape = get_text_embed(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
+            t5_device = None
+            if device == "cuda" and torch.cuda.is_available():
+                cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+            else:
+                cardMemory = 0
+            cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
+            if cpuMemoryUnused >= 12:
+                t5_device = "cpu"
+            if cardMemory >= 7.6:
+                t5_device = device
+            if use_ella and t5_device is not None:
+                t5_clip_embed, t5_clip_neg_embed = get_text_embed_t5(data, negative_data, t5_device, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
+            else:
+                if use_ella:
+                    rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 8GB of VRAM, OR 20GB of RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
+                conditioning, negative_conditioning, shape = get_text_embed_clip(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
 
         return conditioning, negative_conditioning, encoded_latent, steps, scale, runs, data, negative_data, seeds, batch, raw_loras
 
@@ -2461,6 +2652,8 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
 # Generate image from text prompt
 def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
+
+    use_ella = True
     
     # Check gpu availability
     if device == "cuda" and not torch.cuda.is_available():
@@ -2505,7 +2698,8 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     loras = manageComposition(lighting, composition, loras)
 
     # Resolution adapter
-    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
+    if math.sqrt(gWidth * gHeight) < 60:
+        loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Composition enhancement settings (high res fix)
     pre_steps = steps
@@ -2522,8 +2716,8 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
         gHeight = int((lower * max(1, 1 / aspect)) + ((gx / 7) * (1 / aspect)))
 
         # Curves defined by https://www.desmos.com/calculator/kny0embnkg
-        pre_steps = round(steps * ((10 - (((quality - 1.1) ** 2) / 8)) / 10))
-        up_steps = round(steps * max(0.42, ((((quality - 7.2) ** 2) / 2.5) + 3.2) / 10))
+        pre_steps = round(steps * ((10 - (((quality - 1.1) ** 2) / 15)) / 10))
+        up_steps = round(steps * max(0.42, ((((quality - 8.7) ** 2) / 6) + 6.5) / 10))
     else:
         upscale = False
 
@@ -2619,7 +2813,24 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     attributes = {"sliders": []}
 
     with precision_scope:
-        conditioning, negative_conditioning, shape = get_text_embed(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes)
+        t5_device = None
+        if device == "cuda" and torch.cuda.is_available():
+            cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+        else:
+            cardMemory = 0
+        cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
+        if cpuMemoryUnused >= 12:
+            t5_device = "cpu"
+        if cardMemory >= 7.6:
+            t5_device = device
+        if use_ella and t5_device is not None:
+            t5_clip_embed, t5_clip_neg_embed = get_text_embed_t5(data, negative_data, t5_device, device, precision)
+            conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, pre_steps, runs, batch, total_images, gWidth, gHeight, device, precision)
+        else:
+            if use_ella:
+                rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 8GB of VRAM, OR 20GB of RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
+            conditioning, negative_conditioning, shape = get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes)
+            
     
     with torch.no_grad():
         base_count = 0
@@ -2657,6 +2868,10 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
                                {"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
 
                 if upscale:
+                    # RECONDITION SAMPLING !!!!!!!!!
+                    if use_ella and t5_device is not None:
+                        conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, up_steps, runs, batch, total_images, gWidth, gHeight, device, precision)
+
                     # Apply 'cropped' lora for enhanced composition at high resolution
                     crop_weight = max(3, min(round(math.sqrt(max(1, 2 * ((math.sqrt((W // 8) * (H // 8))/10) - 9))) + 1, 2), 7))
                     loraPair = {"file": os.path.join(os.path.join(modelPath, "LECO"), "crop.leco"), "weight": crop_weight}
@@ -2742,6 +2957,8 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
 def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, images, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
 
+    use_ella = True
+
     # Check gpu availability
     if device == "cuda" and not torch.cuda.is_available():
         if torch.backends.mps.is_available():
@@ -2793,7 +3010,8 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     loras = manageComposition(lighting, composition, loras)
 
     # Resolution adapter
-    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
+    if math.sqrt((W // 8) * (H // 8)) < 60:
+        loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
@@ -2913,7 +3131,23 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
             #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
             attributes = {"sliders": []}
             
-            conditioning, negative_conditioning, shape = get_text_embed(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
+            t5_device = None
+            if device == "cuda" and torch.cuda.is_available():
+                cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
+            else:
+                cardMemory = 0
+            cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
+            if cpuMemoryUnused >= 12:
+                t5_device = "cpu"
+            if cardMemory >= 7.6:
+                t5_device = device
+            if use_ella and t5_device is not None:
+                t5_clip_embed, t5_clip_neg_embed = get_text_embed_t5(data, negative_data, t5_device, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
+            else:
+                if use_ella:
+                    rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 8GB of VRAM, OR 20GB of RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
+                conditioning, negative_conditioning, shape = get_text_embed_clip(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
 
         base_count = 0
         output = []

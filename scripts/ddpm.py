@@ -28,6 +28,7 @@ from ldm.util import (
     make_ddim_sampling_parameters,
     make_ddim_timesteps,
     noise_like,
+    rescale_noise_cfg
 )
 from samplers import (
     CompVisDenoiser,
@@ -172,7 +173,7 @@ def get_sigmas_karras(n, sigma_min=0.1, sigma_max=10, rho=7.0, device='cpu'):
     sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
     return append_zero(sigmas).to(device)
 
-def get_sigmas_ays(n, sigma_min=0.0, sigma_max=10, device='cpu'):
+def get_sigmas_ays(n, sigma_min=0.0, sigma_max=14.6146, device='cpu'):
     alpha_min = torch.arctan(torch.tensor(sigma_min, device=device))
     alpha_max = torch.arctan(torch.tensor(sigma_max, device=device))
     sigmas = torch.empty((n+1,), device=device)
@@ -825,24 +826,29 @@ class UNet(DDPM):
                 x0_noisy = x0
                 x_dec = x0_noisy * mask + (1.0 - mask) * x_dec
 
-            # Get conditioning from timestep
-            condStep = map_range(i, (0, len(time_range)-1), (0, len(conditional_guidance)-1), 0.5)
-            condStepInt = round(condStep)
+            if len(conditional_guidance) == len(time_range-1):
+                text_embed = conditional_guidance[index]
+                neg_text_embed = unconditional_guidance[index]
+            else:
 
-            text_embed = conditional_guidance[condStepInt]
-            neg_text_embed = unconditional_guidance[condStepInt]
+                # Get conditioning from timestep
+                condStep = map_range(index, (0, len(time_range)-1), (0, len(conditional_guidance)-1), 0.5)
+                condStepInt = round(condStep)
 
-            # Fraction off of whole number
-            fraction_off = condStep - math.floor(condStep)
+                text_embed = conditional_guidance[condStepInt]
+                neg_text_embed = unconditional_guidance[condStepInt]
 
-            # Lerp conditioning smoothly
-            if fraction_off > 0.5 and fraction_off > 0:
-                lerp_text_embed = text_embed
-                text_embed = conditional_guidance[condStepInt-1]
-                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
-            elif condStepInt < len(conditional_guidance)-1 and fraction_off > 0:
-                lerp_text_embed = conditional_guidance[condStepInt+1]
-                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
+                # Fraction off of whole number
+                fraction_off = condStep - math.floor(condStep)
+
+                # Lerp conditioning smoothly
+                if fraction_off > 0.5 and fraction_off > 0:
+                    lerp_text_embed = text_embed
+                    text_embed = conditional_guidance[condStepInt-1]
+                    text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
+                elif condStepInt < len(conditional_guidance)-1 and fraction_off > 0:
+                    lerp_text_embed = conditional_guidance[condStepInt+1]
+                    text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
 
             x_dec = self.p_sample_ddim(
                 x_dec,
@@ -877,19 +883,16 @@ class UNet(DDPM):
         b, *_, device = *x.shape, x.device
 
         if len(conditional_guidance) == 1 and (unconditional_guidance is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3))))):
-            e_t = self.apply_model(x, t, conditional_guidance)
+            denoised = self.apply_model(x, t, conditional_guidance)
         else:
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
             c_in = torch.cat([unconditional_guidance, conditional_guidance])
             e_t_uncond, e_t = self.apply_model(x_in, t_in, c_in).chunk(2)
-            e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
+            denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
-        if score_corrector is not None:
-            assert self.model.parameterization == "eps"
-            e_t = score_corrector.modify_score(
-                self.model, e_t, x, t, conditional_guidance, **corrector_kwargs
-            )
+            # Rescale CFG
+            denoised = rescale_noise_cfg(denoised, e_t)
 
         alphas = self.ddim_alphas
         alphas_prev = self.ddim_alphas_prev
@@ -904,14 +907,10 @@ class UNet(DDPM):
         )
 
         # current prediction for x_0
-        pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-        if quantize_denoised:
-            pred_x0, _, *_ = self.first_stage_model.quantize(pred_x0)
+        pred_x0 = (x - sqrt_one_minus_at * denoised) / a_t.sqrt()
         # direction pointing to x_t
-        dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * e_t
+        dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * denoised
         noise = sigma_t * noise_like(x.shape, device, repeat_noise) * temperature
-        if noise_dropout > 0.0:
-            noise = torch.nn.functional.dropout(noise, p=noise_dropout)
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
         return x_prev
 
@@ -946,53 +945,54 @@ class UNet(DDPM):
 
         s_in = x.new_ones([x.shape[0]]).half()
         for index in clbar(range(len(sigmas) - 1), name = "Samples", position = "first", prefixwidth = 12, suffixwidth = 28):
-            gamma = (
-                min(s_churn / (len(sigmas) - 1), 2**0.5 - 1)
-                if s_tmin <= sigmas[index] <= s_tmax
-                else 0.0
-            )
-            eps = torch.randn_like(x) * s_noise
-            sigma_hat = (sigmas[index] * (gamma + 1)).half()
+            gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[index] <= s_tmax else 0.
+            sigma_hat = sigmas[index] * (gamma + 1)
             if gamma > 0:
-                x = x + eps * (sigma_hat**2 - sigmas[index] ** 2) ** 0.5
+                eps = torch.randn_like(x) * s_noise
+                x = x + eps * (sigma_hat ** 2 - sigmas[index] ** 2) ** 0.5
 
             s_i = sigma_hat * s_in
 
-            # Get conditioning from timestep
-            condStep = map_range(index, (0, len(sigmas)-2), (0, len(conditional_guidance)-1), 0.5)
-            condStepInt = round(condStep)
+            if len(conditional_guidance) == len(sigmas-1):
+                text_embed = conditional_guidance[index]
+                neg_text_embed = unconditional_guidance[index]
+                print("using conds")
+            else:
 
-            text_embed = conditional_guidance[condStepInt]
-            neg_text_embed = unconditional_guidance[condStepInt]
+                # Get conditioning from timestep
+                condStep = map_range(index, (0, len(sigmas)-1), (0, len(conditional_guidance)-1), 0.5)
+                condStepInt = round(condStep)
 
-            # Fraction off of whole number
-            fraction_off = condStep - math.floor(condStep)
+                text_embed = conditional_guidance[condStepInt]
+                neg_text_embed = unconditional_guidance[condStepInt]
 
-            # Lerp conditioning smoothly
-            if fraction_off > 0.5 and fraction_off > 0:
-                lerp_text_embed = text_embed
-                text_embed = conditional_guidance[condStepInt-1]
-                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
-            elif condStepInt < len(conditional_guidance)-1 and fraction_off > 0:
-                lerp_text_embed = conditional_guidance[condStepInt+1]
-                text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
+                # Fraction off of whole number
+                fraction_off = condStep - math.floor(condStep)
+
+                # Lerp conditioning smoothly
+                if fraction_off > 0.5 and fraction_off > 0:
+                    lerp_text_embed = text_embed
+                    text_embed = conditional_guidance[condStepInt-1]
+                    text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
+                elif condStepInt < len(conditional_guidance)-1 and fraction_off > 0:
+                    lerp_text_embed = conditional_guidance[condStepInt+1]
+                    text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
 
             if len(conditional_guidance) == 1 and (neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(len(sigmas)/10))) > 0 and (index >= min(20, max(8, len(sigmas)/3))))):
-                c_out, c_in = [
-                    append_dims(tmp, x.ndim) for tmp in cvd.get_scalings(s_i)
-                ]
+                c_out, c_in = [append_dims(tmp, x.ndim) for tmp in cvd.get_scalings(s_i)]
                 eps = self.apply_model(x * c_in, cvd.sigma_to_t(s_i), text_embed)
                 denoised = x + eps * c_out
             else:
                 x_in = torch.cat([x] * 2)
                 t_in = torch.cat([s_i] * 2)
                 cond_in = torch.cat([neg_text_embed, text_embed])
-                c_out, c_in = [
-                    append_dims(tmp, x_in.ndim) for tmp in cvd.get_scalings(t_in)
-                ]
+                c_out, c_in = [append_dims(tmp, x_in.ndim) for tmp in cvd.get_scalings(t_in)]
                 eps = self.apply_model(x_in * c_in, cvd.sigma_to_t(t_in), cond_in)
                 e_t_uncond, e_t = (x_in + eps * c_out).chunk(2)
                 denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
+
+                # Rescale CFG
+                #denoised = rescale_noise_cfg(denoised, e_t)
 
             d = to_d(x, sigma_hat, denoised)
             dt = sigmas[index + 1] - sigma_hat
