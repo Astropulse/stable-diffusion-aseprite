@@ -20,7 +20,7 @@ try:
     import psutil
 
     # Import built libraries
-    from ldm.util import instantiate_from_config, max_tile, make_beta_schedule, make_ddim_timesteps
+    from ldm.util import instantiate_from_config, make_beta_schedule
     from optimization.pixelvae import load_pixelvae_model
     from optimization.taesd import TAESD
     from lora import (
@@ -2383,8 +2383,12 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
     if not found_contrast:
         loras.append({"file": os.path.join(lecoPath, "contrast.leco"), "weight": 200})
 
+    if math.sqrt((H // 8) * (W // 8)) < 24:
+        use_ella = False
+
     # Resolution adapter
-    loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
+    if math.sqrt((H // 8) * (W // 8)) < 60 and pixelSize == 8:
+        loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
@@ -2690,6 +2694,9 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     gWidth = W // 8
     gHeight = H // 8
 
+    if math.sqrt(gWidth * gHeight) < 24:
+        use_ella = False
+
     if math.sqrt(gWidth * gHeight) > 104:
         resfix_weight = round(max(4, min(((((math.sqrt(gWidth * gHeight)/10) - 10) ** 3) / 3000) + 4, 7.5)) * 10)
         loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": resfix_weight})
@@ -2698,7 +2705,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
     loras = manageComposition(lighting, composition, loras)
 
     # Resolution adapter
-    if math.sqrt(gWidth * gHeight) < 60:
+    if math.sqrt(gWidth * gHeight) < 60 and pixelSize == 8:
         loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Composition enhancement settings (high res fix)
@@ -2991,6 +2998,9 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     global modelPath
 
     # High resolution adjustments for consistency
+    if math.sqrt((H // 8) * (W // 8)) < 24:
+        use_ella = False
+
     if math.sqrt((W // 8) * (H // 8)) > 104:
         loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": 40})
     
@@ -3010,7 +3020,7 @@ def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality,
     loras = manageComposition(lighting, composition, loras)
 
     # Resolution adapter
-    if math.sqrt((W // 8) * (H // 8)) < 60:
+    if math.sqrt((W // 8) * (H // 8)) < 60 and pixelSize == 8:
         loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
 
     # Apply modifications to raw prompts
