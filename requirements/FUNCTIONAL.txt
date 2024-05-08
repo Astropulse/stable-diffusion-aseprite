@@ -14,9 +14,10 @@ test-tube>=0.7.5
 streamlit>=0.73.1
 einops==0.3.0
 torch-fidelity==0.3.0
-transformers==4.38.1
+transformers==4.40.2
+quanto==0.1.0
 torchmetrics==0.7.0
-safetensors==0.4.2
+safetensors==0.4.3
 kornia==0.6
 accelerate==0.24.1
 taming-transformers-rom1504==0.0.6
