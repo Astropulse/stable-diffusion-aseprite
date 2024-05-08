@@ -992,7 +992,7 @@ class UNet(DDPM):
                 denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
                 # Rescale CFG
-                #denoised = rescale_noise_cfg(denoised, e_t)
+                denoised = rescale_noise_cfg(denoised, e_t)
 
             d = to_d(x, sigma_hat, denoised)
             dt = sigmas[index + 1] - sigma_hat

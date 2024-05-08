@@ -33,7 +33,6 @@ import json
 
 try:
     from transformers import pipeline, set_seed, AutoModelForCausalLM, AutoTokenizer
-    from optimum.bettertransformer import BetterTransformer
 except:
     pass
 
