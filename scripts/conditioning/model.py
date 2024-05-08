@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import math
 
-from transformers import T5EncoderModel, T5Tokenizer
+from transformers import T5EncoderModel, T5Tokenizer, QuantoConfig
 from .activations import get_activation
 
 
@@ -218,10 +218,12 @@ class PerceiverResampler(nn.Module):
 
 
 class T5TextEmbedder(nn.Module):
-    def __init__(self, pretrained_path="google/flan-t5-xl", max_length=None):
+    def __init__(self, pretrained_path="Kijai/flan-t5-xl-encoder-only-bf16", device="cpu", max_length=None):
         super().__init__()
-        self.model = T5EncoderModel.from_pretrained(pretrained_path)
         self.tokenizer = T5Tokenizer.from_pretrained(pretrained_path)
+        quantization_config = QuantoConfig(weights="int4")
+        self.model = T5EncoderModel.from_pretrained(pretrained_path, device_map=device, low_cpu_mem_usage=True, quantization_config=quantization_config)
+
         self.max_length = max_length
 
     def forward(
