@@ -136,7 +136,7 @@ system_models = ["quality", "resfix", "adapter", "crop", "detail", "brightness",
 global sounds
 sounds = False
 
-expectedVersion = "11.0.0"
+expectedVersion = "11.5.0"
 
 global maxSize
 
@@ -917,10 +917,10 @@ def unload_ella(device):
             time.sleep(1)
 
 
-def unload_T5(device):
+def unload_T5(device, force=False):
     global modelT5
     cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
-    if cpuMemoryUnused > 8:
+    if cpuMemoryUnused > 8 and not force:
         if device == "cuda" and modelT5 is not None:
             mem = torch.cuda.memory_allocated() / 1e6
             modelT5.to("cpu")
@@ -1936,6 +1936,10 @@ def timestep(sigma):
 
 # Generate the text embeddings for prompts
 def get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, gHeight, device, attributes):
+    global modelCS
+    global modelT5
+    if modelT5 is not None:
+        unload_T5(device, True)
     # Create conditioning values for each batch, then unload the text encoder
     negative_conditioning = []
     conditioning = []
@@ -2259,7 +2263,7 @@ def paletteGen(prompt, colors, seed, device, precision):
     width = 512+((512/base)*(colors-base))
 
     # Generate text-to-image conversion with specified parameters
-    for _ in txt2img(prompt, "", False, False, int(width), 512, 1, False, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
+    for _ in txt2img(prompt, "", False, False, False, int(width), 512, 1, False, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
         image = _[1]
 
     # Perform k-centroid downscaling on the image
@@ -2356,10 +2360,8 @@ def manageComposition(lighting, composition, loras):
 
 
 # Prepare variables for controlnet inference
-def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
+def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
     raw_loras = []
-
-    use_ella = True
     
     # Check gpu availability
     if device == "cuda" and not torch.cuda.is_available():
@@ -2535,7 +2537,7 @@ def prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pi
 
 
 # Run controlnet inference
-def neural_inference(modelFileString, title, controlnets, prompt, negative, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
+def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
     timer = time.time()
     global modelCS
     global modelFS
@@ -2570,7 +2572,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
             prompt = remove_repeated_words(processor.decode(model.generate(**inputs, max_new_tokens=30)[0], skip_special_tokens=True))
             rprint(f"[#48a971]Caption: [#494b9b]{prompt}")
     
-    conditioning, negative_conditioning, image_embed, steps, scale, runs, data, negative_data, seeds, batch, raw_loras = prepare_inference(title, prompt, negative, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, init_img)
+    conditioning, negative_conditioning, image_embed, steps, scale, runs, data, negative_data, seeds, batch, raw_loras = prepare_inference(title, prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, init_img)
 
     title = title.lower().replace(' ', '_')
 
@@ -2679,10 +2681,8 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, auto
 
 
 # Generate image from text prompt
-def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
+def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, upscale, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
-
-    use_ella = True
     
     # Check gpu availability
     if device == "cuda" and not torch.cuda.is_available():
@@ -2984,7 +2984,7 @@ def txt2img(prompt, negative, translate, promptTuning, W, H, pixelSize, upscale,
 
 
 # Generate image from image+text prompt
-def img2img(prompt, negative, translate, promptTuning, W, H, pixelSize, quality, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, images, tilingX, tilingY, preview, pixelvae, post):
+def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, quality, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, images, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
 
     use_ella = True
@@ -3509,6 +3509,7 @@ async def server(websocket):
                                 controlnets,
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 False,
                                 values["translate"],
                                 values["prompt_tuning"],
@@ -3600,6 +3601,7 @@ async def server(websocket):
                                 controlnets,
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 values["blip"],
                                 False,
                                 values["prompt_tuning"],
@@ -3688,6 +3690,7 @@ async def server(websocket):
                                 controlnets,
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 values["blip"],
                                 False,
                                 values["prompt_tuning"],
@@ -3774,6 +3777,7 @@ async def server(websocket):
                                 controlnets,
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 values["blip"],
                                 False,
                                 values["prompt_tuning"],
@@ -3836,6 +3840,7 @@ async def server(websocket):
                             for result in txt2img(
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 values["translate"],
                                 values["prompt_tuning"],
                                 values["width"],
@@ -3948,6 +3953,7 @@ async def server(websocket):
                                 controlnets,
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 False,
                                 values["translate"],
                                 values["prompt_tuning"],
@@ -4009,6 +4015,7 @@ async def server(websocket):
                             for result in img2img(
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 values["translate"],
                                 values["prompt_tuning"],
                                 values["width"],
@@ -4121,6 +4128,7 @@ async def server(websocket):
                                 controlnets,
                                 values["prompt"],
                                 values["negative"],
+                                values["use_ella"],
                                 False,
                                 values["translate"],
                                 values["prompt_tuning"],
