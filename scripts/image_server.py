@@ -246,12 +246,18 @@ def get_precision(device, precision):
         elif gpu_name.startswith("NVIDIA GeForce GTX 16") and torch.cuda.get_device_capability(device) == (7, 5):
             torch.backends.cudnn.benchmark = True
             # Check for FP16 support
-            try:
-                _ = torch.ones(1, dtype=torch.float16).cuda()
-                precision = "fp16"
-                model_precision = torch.float16
-                vae_precision = torch.float16
-            except:
+            if not gpu_name.startswith("NVIDIA GeForce GTX 1650"):
+                try:
+                    _ = torch.ones(1, dtype=torch.float16).cuda()
+                    precision = "fp16"
+                    model_precision = torch.float16
+                    vae_precision = torch.float16
+                except:
+                    # fp16 is not supported, fallback to fp32
+                    precision = "fp32"
+                    model_precision = torch.float32
+                    vae_precision = torch.float32
+            else:
                 # fp16 is not supported, fallback to fp32
                 precision = "fp32"
                 model_precision = torch.float32
