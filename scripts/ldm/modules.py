@@ -23,10 +23,15 @@ from .util import (
     to_tile,
     from_tile,
     max_tile,
-    ToDo
+    ToDo,
+    timestep,
+    parse_blocks,
 )
 
 global original_shape
+global window_args, last_shift, last_block
+window_args = last_shift = last_block = None
+    
 
 def count_flops_attn(model, _x, y):
     """
@@ -163,39 +168,6 @@ class Upsample(nn.Module):
     def forward(self, x):
         x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
         if self.with_conv:
-            x = self.conv(x)
-        return x
-
-
-class UnetUpsample(nn.Module):
-    """
-    An upsampling layer with an optional convolution.
-    :param channels: channels in the inputs and outputs.
-    :param use_conv: a bool determining if a convolution is applied.
-    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
-                 upsampling occurs in the inner-two dimensions.
-    """
-
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1):
-        super().__init__()
-        self.channels = channels
-        self.out_channels = out_channels or channels
-        self.use_conv = use_conv
-        self.dims = dims
-        if use_conv:
-            self.conv = conv_nd(
-                dims, self.channels, self.out_channels, 3, padding=padding
-            )
-
-    def forward(self, x):
-        assert x.shape[1] == self.channels
-        if self.dims == 3:
-            x = F.interpolate(
-                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
-            )
-        else:
-            x = F.interpolate(x, scale_factor=2, mode="nearest")
-        if self.use_conv:
             x = self.conv(x)
         return x
 
@@ -798,25 +770,130 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None):
+    @staticmethod
+    def window_partition(x, window_size, shift_size, height, width) -> torch.Tensor:
+        batch, _features, channels = x.shape
+        x = x.view(batch, height, width, channels)
+        if not isinstance(shift_size, (list, tuple)):
+            shift_size = (shift_size, shift_size)
+        if sum(shift_size) > 0:
+            x = torch.roll(x, shifts=(-shift_size[0], -shift_size[1]), dims=(1, 2))
+        x = x.view(
+            batch,
+            height // window_size[0],
+            window_size[0],
+            width // window_size[1],
+            window_size[1],
+            channels,
+        )
+        windows = (
+            x.permute(0, 1, 3, 2, 4, 5)
+            .contiguous()
+            .view(-1, window_size[0], window_size[1], channels)
+        )
+        return windows.view(-1, window_size[0] * window_size[1], channels)
+
+    @staticmethod
+    def window_reverse(windows, window_size, shift_size, height, width) -> torch.Tensor:
+        batch, features, channels = windows.shape
+        windows = windows.view(-1, window_size[0], window_size[1], channels)
+        batch = int(
+            windows.shape[0] / (height * width / window_size[0] / window_size[1]),
+        )
+        x = windows.view(
+            batch,
+            height // window_size[0],
+            width // window_size[1],
+            window_size[0],
+            window_size[1],
+            -1,
+        )
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(batch, height, width, -1)
+        if not isinstance(shift_size, (list, tuple)):
+            shift_size = (shift_size, shift_size)
+        if sum(shift_size) > 0:
+            x = torch.roll(x, shifts=(shift_size[0], shift_size[1]), dims=(1, 2))
+        return x.view(batch, height * width, channels)
+
+    @staticmethod
+    def get_window_args(n, orig_shape, shift) -> tuple:
+        _batch, features, _channels = n.shape
+        orig_height, orig_width = orig_shape[-2:]
+
+        downsample_ratio = int(
+            ((orig_height * orig_width) // features) ** 0.5,
+        )
+        height, width = (
+            orig_height // downsample_ratio,
+            orig_width // downsample_ratio,
+        )
+        window_size = (height // 2, width // 2)
+
+        if shift == 0:
+            shift_size = (0, 0)
+        elif shift == 1:
+            shift_size = (window_size[0] // 4, window_size[1] // 4)
+        elif shift == 2:
+            shift_size = (window_size[0] // 4 * 2, window_size[1] // 4 * 2)
+        else:
+            shift_size = (window_size[0] // 4 * 3, window_size[1] // 4 * 3)
+        return (window_size, shift_size, height, width)
+
+    def forward(self, x, context=None, transformer_options={}):
         return checkpoint(
-            self._forward, (x, context), self.parameters(), self.checkpoint
+            self._forward, (x, context, transformer_options), self.parameters(), self.checkpoint
         )
 
-    def _forward(self, x, context=None):
+    def _forward(self, x, context=None, transformer_options={}):
         x = x.contiguous() if x.device.type == "mps" else x
 
         n = self.norm1(x)
-        q = n
-        k = q
-        v = k
+        q = k = v = n
 
         global original_shape
         _, _, h, w = original_shape
         _, qn, _ = q.shape
 
-        hyperTile = False
+        # MSWMSA Attention
+        use_blocks = transformer_options.get("attn_use_blocks")
+        block = transformer_options.get("block")
+        step_percent = transformer_options.get("percent")
+        start_time, end_time = transformer_options.get("attn_range", (0.0, 1.0))
+        use_mswmsa = transformer_options.get("use_mswmsa")
 
+        global window_args, last_shift, last_block
+        window_args = None
+        last_block = block
+        # Maybe working correctly?
+        
+        if last_block in use_blocks and (start_time <= step_percent <= end_time) and use_mswmsa:
+            # MSW-MSA
+            shift = int(torch.rand(1, device="cpu").item() * 4)
+            if shift == last_shift:
+                shift = (shift + 1) % 4
+            last_shift = shift
+            window_args = tuple(
+                self.get_window_args(x, original_shape, shift) if x is not None else None
+                for x in (q, k, v)
+            )
+            if q is not None and q is k and q is v:
+                q, k, v = (
+                    self.window_partition(
+                        q,
+                        *window_args[0],
+                    ),
+                ) * 3
+            else:
+                q, k, v = tuple(
+                    self.window_partition(x, *window_args[idx])
+                    if x is not None
+                    else None
+                    for idx, x in enumerate((q, k, v))
+                )
+                
+        
+        # HyperTile
+        hyperTile = False
         if hyperTile:
             nw = max_tile(w)
             nh = max_tile(h)
@@ -825,14 +902,23 @@ class BasicTransformerBlock(nn.Module):
                 q = to_tile(q, nh, nw, original_shape)
                 k = to_tile(k, nh, nw, original_shape)
                 v = to_tile(v, nh, nw, original_shape)
-            
+        
+        # TokenDownsampling
         l1_depth = max(1.5, math.sqrt(w * h) / 409)
         l2_depth = max(1.0, math.sqrt(w * h) / 818)
-
+        
         m = ToDo(q, l1_depth, l2_depth, original_shape)
         k, v = m(k), m(v)
-
+        
         n = self.attn1(q, context=k, value=v)
+        
+        
+        if window_args is not None and last_block == transformer_options.get("block") and use_mswmsa:
+            args, window_args = window_args[0], None
+            n = self.window_reverse(n, *args)
+        else:
+            window_args = None
+        
 
         if qn == h * w and hyperTile:
             n = from_tile(n, nh, nw, original_shape)
@@ -878,15 +964,19 @@ class SpatialTransformer(nn.Module):
             nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
         )
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None, transformer_options={}):
+        # note: if no context is given, cross-attention defaults to self-attention
+        if not isinstance(context, list):
+            context = [context] * len(self.transformer_blocks)
         b, c, h, w = x.shape
         x_in = x
         x = self.norm(x)
         x = self.proj_in(x)
-        x = rearrange(x, "b c h w -> b (h w) c")
-        for block in self.transformer_blocks:
-            x = block(x, context=context)
-        x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
+        x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
+        for i, block in enumerate(self.transformer_blocks):
+            transformer_options["block_index"] = i
+            x = block(x, context=context[i], transformer_options=transformer_options)
+        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         x = self.proj_out(x)
         return x + x_in
 
@@ -903,21 +993,54 @@ class TimestepBlock(nn.Module):
         """
 
 
+#This is needed because accelerate makes a copy of transformer_options which breaks "transformer_index"
+def forward_timestep_embed(ts, x, emb, context=None, transformer_options={}, output_shape=None):
+    for layer in ts:
+        if isinstance(layer, TimestepBlock):
+            x = layer(x, emb)
+        elif isinstance(layer, SpatialTransformer):
+            x = layer(x, context, transformer_options)
+            if "transformer_index" in transformer_options:
+                transformer_options["transformer_index"] += 1
+        elif isinstance(layer, UnetUpsample):
+            x = layer(x, output_shape=output_shape)
+        else:
+            x = layer(x)
+    return x
+
+
+class NotFound:
+    pass
+
+
+def hd_forward_timestep_embed(ts, x, emb, *args: list, **kwargs: dict):
+    transformer_options = kwargs.get("transformer_options", NotFound)
+    output_shape = kwargs.get("output_shape", NotFound)
+    transformer_options = (
+        args[1] if transformer_options is NotFound and len(args) > 1 else {}
+    )
+    output_shape = args[2] if output_shape is NotFound and len(args) > 2 else None
+    for layer in ts:
+        if isinstance(layer, HDUpsample):
+            x = layer.forward(
+                x,
+                output_shape=output_shape,
+                transformer_options=transformer_options,
+            )
+        elif isinstance(layer, HDDownsample):
+            x = layer.forward(x, transformer_options=transformer_options)
+        else:
+            x = forward_timestep_embed((layer,), x, emb, *args, **kwargs)
+    return x
+
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """
     A sequential module that passes timestep embeddings to the children that
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None):
-        for layer in self:
-            if isinstance(layer, TimestepBlock):
-                x = layer(x, emb)
-            elif isinstance(layer, SpatialTransformer):
-                x = layer(x, context)
-            else:
-                x = layer(x)
-        return x
+    def forward(self, *args, **kwargs):
+        return hd_forward_timestep_embed(self, *args, **kwargs)
 
 
 class QKVAttentionLegacy(nn.Module):
@@ -988,6 +1111,45 @@ class QKVAttention(nn.Module):
         return count_flops_attn(model, _x, y)
 
 
+class UnetUpsample(nn.Module):
+    """
+    An upsampling layer with an optional convolution.
+    :param channels: channels in the inputs and outputs.
+    :param use_conv: a bool determining if a convolution is applied.
+    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
+                 upsampling occurs in the inner-two dimensions.
+    """
+
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1):
+        super().__init__()
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.dims = dims
+        if use_conv:
+            self.conv = conv_nd(
+                dims, self.channels, self.out_channels, 3, padding=padding
+            )
+
+    def forward(self, x, output_shape=None):
+        assert x.shape[1] == self.channels
+        if self.dims == 3:
+            shape = [x.shape[2], x.shape[3] * 2, x.shape[4] * 2]
+            if output_shape is not None:
+                shape[1] = output_shape[3]
+                shape[2] = output_shape[4]
+        else:
+            shape = [x.shape[2] * 2, x.shape[3] * 2]
+            if output_shape is not None:
+                shape[0] = output_shape[2]
+                shape[1] = output_shape[3]
+
+        x = F.interpolate(x, size=shape, mode="nearest")
+        if self.use_conv:
+            x = self.conv(x)
+        return x
+
+
 class UnetDownsample(nn.Module):
     """
     A downsampling layer with an optional convolution.
@@ -1006,12 +1168,7 @@ class UnetDownsample(nn.Module):
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
             self.op = conv_nd(
-                dims,
-                self.channels,
-                self.out_channels,
-                3,
-                stride=stride,
-                padding=padding,
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding,
             )
         else:
             assert self.channels == self.out_channels
@@ -1021,6 +1178,54 @@ class UnetDownsample(nn.Module):
         assert x.shape[1] == self.channels
         return self.op(x)
 
+
+# HiDiffusion
+class HDUpsample(UnetUpsample):
+    def forward(self, x, output_shape=None, transformer_options=None):
+        start_time, end_time = transformer_options.get("ra_range", (0.0, 0.0))
+        if (
+            self.dims == 3
+            or not self.use_conv
+            or not transformer_options.get("use_hidiff")
+            or transformer_options.get("block") not in transformer_options.get("ra_use_blocks")
+            or not (start_time <= transformer_options.get("percent") <= end_time)
+        ):
+            return super().forward(x, output_shape=output_shape)
+        shape = (
+            output_shape[2:4]
+            if output_shape is not None
+            else (x.shape[2] * 4, x.shape[3] * 4)
+        )
+        if False:
+            x = F.interpolate(x, size=(shape[0] // 2, shape[1] // 2), mode="nearest")
+        x = torch.nn.functional.interpolate(x, size=shape, mode="bicubic")
+        return self.conv(x)
+
+
+# HiDiffusion
+class HDDownsample(UnetDownsample):
+    COPY_OP_KEYS = (
+        "weight_function",
+        "bias_function",
+        "weight",
+        "bias",
+    )
+    def forward(self, x, transformer_options=None):
+        start_time, end_time = transformer_options.get("ra_range", (0.0, 1.0))
+        if (
+            self.dims == 3
+            or not self.use_conv
+            or not transformer_options.get("use_hidiff")
+            or transformer_options.get("block") not in transformer_options.get("ra_use_blocks")
+            or not (start_time <= transformer_options.get("percent") <= end_time)
+        ):
+            return super().forward(x)
+        tempop = conv_nd(
+            self.dims, self.channels, self.out_channels, 3, stride=(4, 4), padding=(2, 2), dilation=(2, 2)
+        )
+        for k in self.COPY_OP_KEYS:
+            setattr(tempop, k, getattr(self.op, k))
+        return tempop(x)
 
 class ResBlock(TimestepBlock):
     """
@@ -1069,11 +1274,11 @@ class ResBlock(TimestepBlock):
         self.updown = up or down
 
         if up:
-            self.h_upd = UnetUpsample(channels, False, dims)
-            self.x_upd = UnetUpsample(channels, False, dims)
+            self.h_upd = HDUpsample(channels, False, dims)
+            self.x_upd = HDUpsample(channels, False, dims)
         elif down:
-            self.h_upd = UnetDownsample(channels, False, dims)
-            self.x_upd = UnetDownsample(channels, False, dims)
+            self.h_upd = HDDownsample(channels, False, dims)
+            self.x_upd = HDDownsample(channels, False, dims)
         else:
             self.h_upd = self.x_upd = nn.Identity()
 
@@ -1343,7 +1548,7 @@ class UNetModelEncode(nn.Module):
                             down=True,
                         )
                         if resblock_updown
-                        else UnetDownsample(
+                        else HDDownsample(
                             ch, conv_resample, dims=dims, out_channels=out_ch
                         )
                     )
@@ -1396,7 +1601,7 @@ class UNetModelEncode(nn.Module):
         )
         self._feature_size += ch
 
-    def forward(self, x, timesteps=None, context=None, y=None):
+    def forward(self, x, timestep=None, context=None, y=None, transformer_options={}):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -1411,18 +1616,31 @@ class UNetModelEncode(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        t_emb = timestep_embedding(timestep, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
+
+        # HiDiffusion
+        use_blocks = transformer_options.get("ca_use_blocks")
+        step_percent = transformer_options.get("percent")
+        start_time, end_time = transformer_options.get("ca_range", (0.0, 1.0))
+        use_hidiff = transformer_options.get("use_hidiff")
 
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
         h = x.type(self.dtype)
-        for module in self.input_blocks:
-            h = module(h, emb, context)
+        for id, module in enumerate(self.input_blocks):
+            transformer_options["block"] = ("input", id)
+            h = module(h, emb, context, transformer_options)
+            # HiDiffusion
+            if transformer_options.get("block") in use_blocks and (start_time <= step_percent <= end_time) and use_hidiff:
+                h = torch.nn.functional.avg_pool2d(h, kernel_size=(2, 2))
+
             hs.append(h)
-        h = self.middle_block(h, emb, context)
+        transformer_options["block"] = ("middle", 0)
+        transformer_options["timestep"] = timestep
+        h = self.middle_block(h, emb, context, transformer_options)
 
         return h, emb, hs
 
@@ -1604,7 +1822,7 @@ class UNetModelDecode(nn.Module):
                             up=True,
                         )
                         if resblock_updown
-                        else UnetUpsample(
+                        else HDUpsample(
                             ch, conv_resample, dims=dims, out_channels=out_ch
                         )
                     )
@@ -1624,7 +1842,7 @@ class UNetModelDecode(nn.Module):
                 # nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
             )
 
-    def forward(self, h, emb, tp, hs, context=None, y=None):
+    def forward(self, h, emb, tp, hs, timestep=None, context=None, y=None, transformer_options={}):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -1633,12 +1851,32 @@ class UNetModelDecode(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        # HiDiffusion
+        use_blocks = transformer_options.get("ca_use_blocks")
+        step_percent = transformer_options.get("percent")
+        start_time, end_time = transformer_options.get("ca_range")
+        use_hidiff = transformer_options.get("use_hidiff")
 
-        for module in self.output_blocks:
-            if h.shape[-2:] != hs[-1].shape[-2:]:
-                h = F.interpolate(h, hs[-1].shape[-2:], mode="nearest")
-            h = torch.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context)
+        for id, module in enumerate(self.output_blocks):
+            transformer_options["block"] = ("output", id)
+            hsp = hs.pop()
+
+            # HiDiffusion
+            if transformer_options.get("block") in use_blocks and (start_time <= step_percent <= end_time) and use_hidiff:
+                sigma = transformer_options.get("sigma")
+                block = transformer_options.get("block", ("", 0))[1]
+                if sigma is not None and (block < 3 or block > 6):
+                    sigma /= 16
+                h = torch.nn.functional.interpolate(h, size=(hsp.shape[2], hsp.shape[3]), mode="bicubic")
+
+            transformer_options["timestep"] = timestep
+            h = torch.cat([h, hsp], dim=1)
+            del hsp
+            if len(hs) > 0:
+                output_shape = hs[-1].shape
+            else:
+                output_shape = None
+            h = module(h, emb, context, transformer_options, output_shape)
         h = h.type(tp)
         if self.predict_codebook_ids:
             return self.id_predictor(h)

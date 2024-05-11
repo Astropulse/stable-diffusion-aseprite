@@ -101,6 +101,19 @@ def make_beta_schedule(
     return betas.numpy()
 
 
+def timestep(sigma):
+    log_sigma = sigma.log()
+
+    betas = torch.tensor(make_beta_schedule("linear", 1000))
+    alphas = 1. - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
+
+    log_sigmas = sigmas.log().float()
+    dists = log_sigma.to(log_sigmas.device) - log_sigmas[:, None]
+    return dists.abs().argmin(dim=0).view(sigma.shape).to(sigma.device)
+
+
 def make_ddim_timesteps(
     ddim_discr_method, num_ddim_timesteps, num_ddpm_timesteps, verbose=True
 ):
@@ -216,6 +229,56 @@ def linear(*args, **kwargs):
     """
     return nn.Linear(*args, **kwargs)
 
+
+
+class CastWeightBiasOp:
+    comfy_cast_weights = True
+    weight_function = None
+    bias_function = None
+
+
+def cast_bias_weight(s, input):
+    bias = None
+    non_blocking = False
+    if s.bias is not None:
+        bias = s.bias.to(device=input.device, dtype=input.dtype, non_blocking=non_blocking)
+        if s.bias_function is not None:
+            bias = s.bias_function(bias)
+    weight = s.weight.to(device=input.device, dtype=input.dtype, non_blocking=non_blocking)
+    if s.weight_function is not None:
+        weight = s.weight_function(weight)
+    return weight, bias
+
+class Conv2d(torch.nn.Conv2d, CastWeightBiasOp):
+    def reset_parameters(self):
+        return None
+
+    def forward_comfy_cast_weights(self, input):
+        weight, bias = cast_bias_weight(self, input)
+        return self._conv_forward(input, weight, bias)
+
+    def forward(self, *args, **kwargs):
+        if self.comfy_cast_weights:
+            return self.forward_comfy_cast_weights(*args, **kwargs)
+        else:
+            return super().forward(*args, **kwargs)
+
+class Conv3d(torch.nn.Conv3d, CastWeightBiasOp):
+    def reset_parameters(self):
+        return None
+
+    def forward_comfy_cast_weights(self, input):
+        weight, bias = cast_bias_weight(self, input)
+        return self._conv_forward(input, weight, bias)
+
+    def forward(self, *args, **kwargs):
+        if self.comfy_cast_weights:
+            return self.forward_comfy_cast_weights(*args, **kwargs)
+        else:
+            return super().forward(*args, **kwargs)
+
+nn.Conv2d = Conv2d
+nn.Conv3d = Conv3d
 
 def conv_nd(dims, *args, **kwargs):
     """
@@ -375,3 +438,8 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
     noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
     return noise_cfg
+
+
+def parse_blocks(name, s) -> set:
+    vals = (rawval.strip() for rawval in s.split(","))
+    return {(name, int(val.strip())) for val in vals if val}

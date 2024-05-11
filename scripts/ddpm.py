@@ -28,7 +28,8 @@ from ldm.util import (
     make_ddim_sampling_parameters,
     make_ddim_timesteps,
     noise_like,
-    rescale_noise_cfg
+    rescale_noise_cfg,
+    parse_blocks
 )
 from samplers import (
     CompVisDenoiser,
@@ -499,8 +500,8 @@ class DiffusionWrapper(pl.LightningModule):
         super().__init__()
         self.diffusion_model = instantiate_from_config(diff_model_config)
 
-    def forward(self, x, t, cc):
-        out = self.diffusion_model(x, t, context=cc)
+    def forward(self, x, t, cc, transformer_options={}):
+        out = self.diffusion_model(x, t, context=cc, transformer_options=transformer_options)
         return out
 
 
@@ -509,8 +510,8 @@ class DiffusionWrapperOut(pl.LightningModule):
         super().__init__()
         self.diffusion_model = instantiate_from_config(diff_model_config)
 
-    def forward(self, h, emb, tp, hs, cc):
-        return self.diffusion_model(h, emb, tp, hs, context=cc)
+    def forward(self, h, emb, tp, hs, t, cc, transformer_options={}):
+        return self.diffusion_model(h, emb, tp, hs, t, context=cc, transformer_options=transformer_options)
 
 
 class UNet(DDPM):
@@ -601,20 +602,32 @@ class UNet(DDPM):
             del self.scale_factor
             self.register_buffer("scale_factor", 1.0 / z.flatten().std())
 
-    def apply_model(self, x_noisy, t, cond, return_ids=False):
+    def apply_model(self, x_noisy, t, cond, transformer_options={}, return_ids=False):
         if not self.turbo:
             self.model1.to(self.cdevice)
 
         step = self.unet_bs
-        h, emb, hs = self.model1(x_noisy[0:step], t[:step], cond[:step])
+        h, emb, hs = self.model1(x_noisy[0:step], t[:step], cond[:step], transformer_options)
         bs = cond.shape[0]
-
         # assert bs%2 == 0
         lenhs = len(hs)
 
+        if not self.turbo:
+            self.model1.to("cpu")
+            self.model2.to(self.cdevice)
+
+        hs_temp = [hs[j][:step] for j in range(lenhs)]
+        x_recon = self.model2(h[:step], emb[:step], x_noisy.dtype, hs_temp, t[:step], cond[:step], transformer_options)
+
+        if not self.turbo:
+            self.model1.to(self.cdevice)
+            self.model2.to("cpu")
+
         for i in range(step, bs, step):
             h_temp, emb_temp, hs_temp = self.model1(
-                x_noisy[i : i + step], t[i : i + step], cond[i : i + step]
+                x_noisy[i : i + step],
+                t[i : i + step], cond[i : i + step],
+                transformer_options,
             )
             h = torch.cat((h, h_temp))
             emb = torch.cat((emb, emb_temp))
@@ -625,9 +638,6 @@ class UNet(DDPM):
             self.model1.to("cpu")
             self.model2.to(self.cdevice)
 
-        hs_temp = [hs[j][:step] for j in range(lenhs)]
-        x_recon = self.model2(h[:step], emb[:step], x_noisy.dtype, hs_temp, cond[:step])
-
         for i in range(step, bs, step):
             hs_temp = [hs[j][i : i + step] for j in range(lenhs)]
             x_recon1 = self.model2(
@@ -635,7 +645,9 @@ class UNet(DDPM):
                 emb[i : i + step],
                 x_noisy.dtype,
                 hs_temp,
+                t[i : i + step],
                 cond[i : i + step],
+                transformer_options,
             )
             x_recon = torch.cat((x_recon, x_recon1))
 
@@ -725,6 +737,30 @@ class UNet(DDPM):
         x_latent = noise if x0 is None else x0
         # sampling
 
+        transformer_options = {}
+
+        # mswmsa attention
+        attn_use_blocks = parse_blocks("input", "1")
+        attn_use_blocks |= parse_blocks("middle", "")
+        attn_use_blocks |= parse_blocks("output", "9,10,11")
+        transformer_options["attn_use_blocks"] = attn_use_blocks
+        transformer_options["attn_range"] = (0.0, 1.0)
+        transformer_options["use_mswmsa"] = False
+
+        # RAUnet settings
+        ra_use_blocks = parse_blocks("input", "3")
+        ra_use_blocks |= parse_blocks("output", "8")
+        transformer_options["ra_use_blocks"] = ra_use_blocks
+        transformer_options["ra_range"] = (0.0, 0.5)
+
+        # CA blocks
+        ca_use_blocks = parse_blocks("input", "")
+        ca_use_blocks |= parse_blocks("output", "")
+        transformer_options["ca_use_blocks"] = ca_use_blocks
+        transformer_options["ca_range"] = (1.0, 0.0)
+
+        transformer_options["use_hidiff"] = True
+
         if sampler == "ddim":
             for samples in self.ddim_sampling(
                 x_latent,
@@ -735,6 +771,7 @@ class UNet(DDPM):
                 mask=mask,
                 init_latent=x_T,
                 use_original_steps=False,
+                transformer_options=transformer_options
             ):
                 yield samples
 
@@ -747,6 +784,7 @@ class UNet(DDPM):
                 conditional_guidance,
                 unconditional_guidance=unconditional_guidance,
                 unconditional_guidance_scale=unconditional_guidance_scale,
+                transformer_options=transformer_options,
             ):
                 yield samples
 
@@ -805,6 +843,7 @@ class UNet(DDPM):
         mask=None,
         init_latent=None,
         use_original_steps=False,
+        transformer_options={},
     ):
         timesteps = self.ddim_timesteps
         timesteps = timesteps[:t_start]
@@ -859,6 +898,7 @@ class UNet(DDPM):
                 use_original_steps=use_original_steps,
                 unconditional_guidance_scale=unconditional_guidance_scale,
                 unconditional_guidance=neg_text_embed,
+                transformer_options=transformer_options,
             )
             yield x_dec
 
@@ -879,25 +919,29 @@ class UNet(DDPM):
         corrector_kwargs=None,
         unconditional_guidance_scale=1.0,
         unconditional_guidance=None,
+        transformer_options={},
     ):
+        alphas = self.ddim_alphas
+        alphas_prev = self.ddim_alphas_prev
+        sqrt_one_minus_alphas = self.ddim_sqrt_one_minus_alphas
+        sigmas = self.ddim_sigmas
+        transformer_options["sigmas"] = sigmas
+        transformer_options["sigma"] = sigmas[index]
         b, *_, device = *x.shape, x.device
 
+        transformer_options["percent"] = abs(1.0 - (index/(total-1)))
         if len(conditional_guidance) == 1 and (unconditional_guidance is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3))))):
-            denoised = self.apply_model(x, t, conditional_guidance)
+            denoised = self.apply_model(x, t, conditional_guidance, transformer_options)
         else:
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
             c_in = torch.cat([unconditional_guidance, conditional_guidance])
-            e_t_uncond, e_t = self.apply_model(x_in, t_in, c_in).chunk(2)
+            e_t_uncond, e_t = self.apply_model(x_in, t_in, c_in, transformer_options).chunk(2)
             denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
             # Rescale CFG
             denoised = rescale_noise_cfg(denoised, e_t)
 
-        alphas = self.ddim_alphas
-        alphas_prev = self.ddim_alphas_prev
-        sqrt_one_minus_alphas = self.ddim_sqrt_one_minus_alphas
-        sigmas = self.ddim_sigmas
         # select parameters corresponding to the currently considered timestep
         a_t = torch.full((b, 1, 1, 1), alphas[index], device=device)
         a_prev = torch.full((b, 1, 1, 1), alphas_prev[index], device=device)
@@ -930,10 +974,12 @@ class UNet(DDPM):
         s_tmin=0.0,
         s_tmax=float("inf"),
         s_noise=1.0,
+        transformer_options={},
     ):
         extra_args = {} if extra_args is None else extra_args
         cvd = CompVisDenoiser(ac)
         sigmas = get_sigmas_ays(S, device=x.device)
+        transformer_options["sigmas"]= sigmas
         x = x * sigmas[0]
 
         # MacOS, what the fuck is wrong with you? Why do I need to print this tensor for it's value to be accurate? Fuck you. What the fuck.
@@ -946,6 +992,7 @@ class UNet(DDPM):
         s_in = x.new_ones([x.shape[0]]).half()
         for index in clbar(range(len(sigmas) - 1), name = "Samples", position = "first", prefixwidth = 12, suffixwidth = 28):
             gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[index] <= s_tmax else 0.
+            transformer_options["sigma"] = sigmas[index]
             sigma_hat = sigmas[index] * (gamma + 1)
             if gamma > 0:
                 eps = torch.randn_like(x) * s_noise
@@ -956,7 +1003,6 @@ class UNet(DDPM):
             if len(conditional_guidance) == len(sigmas-1):
                 text_embed = conditional_guidance[index]
                 neg_text_embed = unconditional_guidance[index]
-                print("using conds")
             else:
 
                 # Get conditioning from timestep
@@ -978,16 +1024,17 @@ class UNet(DDPM):
                     lerp_text_embed = conditional_guidance[condStepInt+1]
                     text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
 
-            if len(conditional_guidance) == 1 and (neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(len(sigmas)/10))) > 0 and (index >= min(20, max(8, len(sigmas)/3))))):
+            transformer_options["percent"] = index/(len(sigmas)-2)
+            if len(conditional_guidance) == 1 and (neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round((len(sigmas)-1)/10))) > 0 and (index >= min(20, max(8, (len(sigmas)-1)/3))))):
                 c_out, c_in = [append_dims(tmp, x.ndim) for tmp in cvd.get_scalings(s_i)]
-                eps = self.apply_model(x * c_in, cvd.sigma_to_t(s_i), text_embed)
+                eps = self.apply_model(x * c_in, cvd.sigma_to_t(s_i), text_embed, transformer_options)
                 denoised = x + eps * c_out
             else:
                 x_in = torch.cat([x] * 2)
                 t_in = torch.cat([s_i] * 2)
                 cond_in = torch.cat([neg_text_embed, text_embed])
                 c_out, c_in = [append_dims(tmp, x_in.ndim) for tmp in cvd.get_scalings(t_in)]
-                eps = self.apply_model(x_in * c_in, cvd.sigma_to_t(t_in), cond_in)
+                eps = self.apply_model(x_in * c_in, cvd.sigma_to_t(t_in), cond_in, transformer_options)
                 e_t_uncond, e_t = (x_in + eps * c_out).chunk(2)
                 denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
