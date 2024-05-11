@@ -418,7 +418,8 @@ def __replacementConv2DConvForward(self, input: Tensor, weight: Tensor, bias: Op
 def patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV):
     # Patch for relevant models
     patch_conv_asymmetric(model, tilingX, tilingY)
-    patch_conv_asymmetric(modelFS, tilingX, tilingY)
+    if modelFS is not None:
+        patch_conv_asymmetric(modelFS, tilingX, tilingY)
     patch_conv_asymmetric(modelTA, tilingX, tilingY)
     patch_conv_asymmetric(modelPV.model, tilingX, tilingY)
 
