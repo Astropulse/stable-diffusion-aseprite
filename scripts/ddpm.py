@@ -29,7 +29,8 @@ from ldm.util import (
     make_ddim_timesteps,
     noise_like,
     rescale_noise_cfg,
-    parse_blocks
+    parse_blocks,
+    timestep
 )
 from samplers import (
     CompVisDenoiser,
@@ -708,11 +709,12 @@ class UNet(DDPM):
         eta=0.0,
         mask=None,
         sampler="ddim",
+        denoise=1.0,
         temperature=1.0,
         noise_dropout=0.0,
         score_corrector=None,
         corrector_kwargs=None,
-        verbose=True,
+        verbose=False,
         x_T=None,
         log_every_t=100,
         unconditional_guidance_scale=1.0,
@@ -739,27 +741,38 @@ class UNet(DDPM):
 
         transformer_options = {}
 
+        _, _, height, width = x_latent.shape
+        size = round(math.sqrt(width * height))
+
+        transformer_options["use_hidiff"] = size >= 80
+        transformer_options["use_mswmsa"] = size > 144 # enable for > 144x144
+
+        # RAUnet settings
+        percent_end = (((((size - 80) / 8) * 5) ** 0.33) - 0.2) / 10
+        ra_use_blocks = parse_blocks("input", "3")
+        ra_use_blocks |= parse_blocks("output", "8")
+        transformer_options["ra_use_blocks"] = ra_use_blocks
+        if transformer_options["use_hidiff"]:
+            transformer_options["ra_range"] = (0.0, percent_end) # (0.0, 0.1) for 80x80 - (0.0, 0.2) for 96x96 - (0.0, 0.3) for 128x128 - (0.0, 0.4) for 192x192 - (0.0, 0.5) for 320x240
+        else:
+            transformer_options["ra_range"] = (1.0, 0.0)
+
+        # Cross Attention blocks
+        percent_end = ((((size - 124) / 8) / 2.2) ** 0.33) / 10
+        ca_use_blocks = parse_blocks("input", "3") # empty for low, 3 for 320x240
+        ca_use_blocks |= parse_blocks("output", "6") # empty for low, 6 for 320x240
+        transformer_options["ca_use_blocks"] = ca_use_blocks
+        if size >= 160 and transformer_options["use_hidiff"]:
+            transformer_options["ca_range"] = (0.0, percent_end) # (1.0, 0.0) for < 112x112 - (0.0, 0.05) for 128x128 - (0.0, 0.15) for 192x192 - (0.0, 0.2) for 320x240
+        else:
+            transformer_options["ca_range"] = (1.0, 0.0)
+
         # mswmsa attention
-        attn_use_blocks = parse_blocks("input", "1")
+        attn_use_blocks = parse_blocks("input", "1, 2")
         attn_use_blocks |= parse_blocks("middle", "")
         attn_use_blocks |= parse_blocks("output", "9,10,11")
         transformer_options["attn_use_blocks"] = attn_use_blocks
         transformer_options["attn_range"] = (0.0, 1.0)
-        transformer_options["use_mswmsa"] = False
-
-        # RAUnet settings
-        ra_use_blocks = parse_blocks("input", "3")
-        ra_use_blocks |= parse_blocks("output", "8")
-        transformer_options["ra_use_blocks"] = ra_use_blocks
-        transformer_options["ra_range"] = (0.0, 0.5)
-
-        # CA blocks
-        ca_use_blocks = parse_blocks("input", "")
-        ca_use_blocks |= parse_blocks("output", "")
-        transformer_options["ca_use_blocks"] = ca_use_blocks
-        transformer_options["ca_range"] = (1.0, 0.0)
-
-        transformer_options["use_hidiff"] = True
 
         if sampler == "ddim":
             for samples in self.ddim_sampling(
@@ -784,6 +797,7 @@ class UNet(DDPM):
                 conditional_guidance,
                 unconditional_guidance=unconditional_guidance,
                 unconditional_guidance_scale=unconditional_guidance_scale,
+                denoise=denoise,
                 transformer_options=transformer_options,
             ):
                 yield samples
@@ -930,7 +944,7 @@ class UNet(DDPM):
         b, *_, device = *x.shape, x.device
 
         transformer_options["percent"] = abs(1.0 - (index/(total-1)))
-        if len(conditional_guidance) == 1 and (unconditional_guidance is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3))))):
+        if not transformer_options["use_hidiff"] and len(conditional_guidance) == 1 and (unconditional_guidance is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round(total/10))) > 0 and (index >= min(20, max(5, total/3))))):
             denoised = self.apply_model(x, t, conditional_guidance, transformer_options)
         else:
             x_in = torch.cat([x] * 2)
@@ -967,6 +981,7 @@ class UNet(DDPM):
         conditional_guidance,
         unconditional_guidance=None,
         unconditional_guidance_scale=1,
+        denoise=1.0,
         extra_args=None,
         callback=None,
         disable=None,
@@ -978,9 +993,11 @@ class UNet(DDPM):
     ):
         extra_args = {} if extra_args is None else extra_args
         cvd = CompVisDenoiser(ac)
-        sigmas = get_sigmas_ays(S, device=x.device)
-        transformer_options["sigmas"]= sigmas
-        x = x * sigmas[0]
+        add_steps = round(8 / denoise) - 8
+        sigmas = get_sigmas_ays(S + add_steps, device=x.device)
+        sigmas = sigmas[-(S + 1):]
+        transformer_options["sigmas"] = sigmas
+        x = x * torch.sqrt(1 + sigmas[0] ** 2.0)
 
         # MacOS, what the fuck is wrong with you? Why do I need to print this tensor for it's value to be accurate? Fuck you. What the fuck.
         # I'm sending it to nothing because I SHOULD NOT NEED TO SEE THE TENSOR TO HAVE IT'S NUMBERS BE RIGHT.
@@ -1000,7 +1017,7 @@ class UNet(DDPM):
 
             s_i = sigma_hat * s_in
 
-            if len(conditional_guidance) == len(sigmas-1):
+            if len(conditional_guidance) == len(sigmas)-1:
                 text_embed = conditional_guidance[index]
                 neg_text_embed = unconditional_guidance[index]
             else:
@@ -1025,7 +1042,7 @@ class UNet(DDPM):
                     text_embed = text_embed * (1-fraction_off) + lerp_text_embed * fraction_off
 
             transformer_options["percent"] = index/(len(sigmas)-2)
-            if len(conditional_guidance) == 1 and (neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round((len(sigmas)-1)/10))) > 0 and (index >= min(20, max(8, (len(sigmas)-1)/3))))):
+            if not transformer_options["use_hidiff"] and len(conditional_guidance) == 1 and (neg_text_embed is None or unconditional_guidance_scale == 1.0 or (index % min(5, max(1, round((len(sigmas)-1)/10))) > 0 and (index >= min(20, max(8, (len(sigmas)-1)/3))))):
                 c_out, c_in = [append_dims(tmp, x.ndim) for tmp in cvd.get_scalings(s_i)]
                 eps = self.apply_model(x * c_in, cvd.sigma_to_t(s_i), text_embed, transformer_options)
                 denoised = x + eps * c_out
