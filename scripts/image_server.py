@@ -13,7 +13,7 @@ try:
     from itertools import product
     from einops import rearrange
     from pytorch_lightning import seed_everything
-    from transformers import BlipProcessor, BlipForConditionalGeneration, AutoImageProcessor, AutoModelForDepthEstimation
+    from transformers import BlipProcessor, BlipForConditionalGeneration, AutoImageProcessor, AutoModelForDepthEstimation, set_seed, T5Tokenizer, T5ForConditionalGeneration
     from typing import Optional
     from safetensors.torch import load_file
     from cryptography.fernet import Fernet
@@ -131,7 +131,7 @@ loadedDevice = "cpu"
 global modelPath
 
 global system_models
-system_models = ["quality", "resfix", "adapter", "crop", "detail", "brightness", "contrast", "saturation", "outline", "color_cr", "color_mg", "color_yb", "light_bf", "light_du", "light_lr"]
+system_models = ["quality", "adapter", "crop", "detail", "brightness", "contrast", "saturation", "outline", "color_cr", "color_mg", "color_yb", "light_bf", "light_du", "light_lr"]
 
 global sounds
 sounds = False
@@ -258,12 +258,18 @@ def get_precision(device, precision):
         elif gpu_name.startswith("NVIDIA GeForce GTX 16") and torch.cuda.get_device_capability(device) == (7, 5):
             torch.backends.cudnn.benchmark = True
             # Check for FP16 support
-            try:
-                _ = torch.ones(1, dtype=torch.float16).cuda()
-                precision = "fp16"
-                model_precision = torch.float16
-                vae_precision = torch.float16
-            except:
+            if not gpu_name.startswith("NVIDIA GeForce GTX 1650"):
+                try:
+                    _ = torch.ones(1, dtype=torch.float16).cuda()
+                    precision = "fp16"
+                    model_precision = torch.float16
+                    vae_precision = torch.float16
+                except:
+                    # fp16 is not supported, fallback to fp32
+                    precision = "fp32"
+                    model_precision = torch.float32
+                    vae_precision = torch.float32
+            else:
                 # fp16 is not supported, fallback to fp32
                 precision = "fp32"
                 model_precision = torch.float32
@@ -430,7 +436,8 @@ def __replacementConv2DConvForward(self, input: Tensor, weight: Tensor, bias: Op
 def patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV):
     # Patch for relevant models
     patch_conv_asymmetric(model, tilingX, tilingY)
-    patch_conv_asymmetric(modelFS, tilingX, tilingY)
+    if modelFS is not None:
+        patch_conv_asymmetric(modelFS, tilingX, tilingY)
     patch_conv_asymmetric(modelTA, tilingX, tilingY)
     patch_conv_asymmetric(modelPV.model, tilingX, tilingY)
 
@@ -1638,6 +1645,28 @@ def rembg(images, modelpath):
     return output
 
 
+# Load T5 small
+def load_t5_pipeline(modelPath, device="cpu"):
+    tokenizer = T5Tokenizer.from_pretrained(modelPath)
+    model = T5ForConditionalGeneration.from_pretrained(modelPath, device_map=device)
+
+    return {"tokenizer": tokenizer, "model": model}
+
+
+# Removed sentence fragments
+def clean_t5_small_output(s):
+    # Find the last occurrence of a comma
+    last_comma_index = s.rfind(',')
+    # If a comma is found, slice the string up to the comma and add a period
+    if last_comma_index != -1:
+        s = s[5:last_comma_index] + '.'
+        return s.strip()
+    else:
+        s = s[5:]  # Return the original string if no comma is found
+        return s.strip()
+
+
+#Using T5-small
 # Generate prompts with LLM
 def generateLLMPrompts(prompts, negatives, seed, translate):
     timer = time.time()
@@ -1649,212 +1678,85 @@ def generateLLMPrompts(prompts, negatives, seed, translate):
 
     if translate:
         # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
-        if loadedDevice == "cuda" and torch.cuda.is_available():
-            cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-        else:
-            cardMemory = 0
-        if cardMemory >= 7.6:
-            if cardMemory <= 10.2:
-                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
-            try:
+        try:
+            with torch.no_grad():
                 # Load LLM for prompt upsampling
                 if modelLM == None:
                     print("\nLoading prompt translation language model")
-                    modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
+                    modelLM = load_t5_pipeline(os.path.join(modelPath, "LLM"), loadedDevice)
+                    play("iteration.wav")
+                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+                
+                modelLM["model"].to(loadedDevice)
+                # Generate responses
+                rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
+
+                upsampled_captions = []
+                for prompt in clbar(prompts, name="Expanding", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
+                    # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
+                    upsampled_caption = None
+                    set_seed(seed)
+
+                    input_text = f", {prompt}"
+                    outputs = modelLM["model"].generate(
+                        modelLM["tokenizer"](input_text, return_tensors="pt").input_ids.to(modelLM["model"].device), 
+                        max_new_tokens=77, 
+                        repetition_penalty=1.2, 
+                        temperature=0.75,
+                        top_p=0.8,
+                        top_k=85,
+                        do_sample=True, 
+                        use_cache=False
+                    )
+                    upsampled_caption = clean_t5_small_output(modelLM["tokenizer"].decode(outputs[0]))
+
+                    seed += 1
+
+                    upsampled_captions.append([upsampled_caption])
                     play("iteration.wav")
 
-                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+                prompts = upsampled_captions
+                del outputs, upsampled_caption
+                clearCache()
 
-                if modelLM is not None:
-                    try:
-                        # Generate responses
-                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
-
-                        upsampled_captions = []
-                        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
-                            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
-                            upsampled_caption = None
-                            retrys = 5
-                            while upsampled_caption == None and retrys > 0:
-                                outputs = upsample_caption(modelLM, prompt[0], seed)
-                                upsampled_caption = collect_response(outputs)
-                                retrys -= 1
-                            seed += 1
-
-                            if upsampled_caption == None:
-                                upsampled_caption = prompt[0]
-
-                            upsampled_captions.append([upsampled_caption])
-                            play("iteration.wav")
-
-                        prompts = upsampled_captions
-                        del outputs, upsampled_caption
-                        clearCache()
-
-                        seed = seed - len(prompts)
-                        print()
-                        for i, prompt in enumerate(prompts[:8]):
-                            rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Prompt: [#494b9b]{prompt[0]}")
-                            seed += 1
-                        if len(prompts) > 8:
-                            rprint(f"[#48a971]Remaining prompts generated but not displayed.")
-                    except:
-                        rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
-            except Exception as e:
-                if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
-                elif "GPU is required" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
-                else:
-                    rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                    rprint(f"\n[#494b9b]Translation model could not be loaded.")
-        else:
-            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
-    else:
-        if modelLM is not None:
-            del modelLM
-            clearCache()
-            modelLM = None
-    
-    return prompts, negatives
-
-
-# Generate cascading prompts with LLM
-def generateCascadePrompts(prompts, negatives, seed, translate):
-    timer = time.time()
-    global modelLM
-    global loadedDevice
-    global modelType
-    global sounds
-    global modelPath
-
-    if translate and loadedDevice != "cpu":
-        # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
-        if loadedDevice == "cuda" and torch.cuda.is_available():
-            cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-        else:
-            cardMemory = 0
-        if cardMemory >= 7.6:
-            if cardMemory <= 10.2:
-                rprint(f"\n[#494b9b]Memory is less than 10GB, image generation speed may suffer with LLM loaded.")
-            try:
-                # Load LLM for prompt upsampling
-                if modelLM == None:
-                    print("\nLoading prompt translation language model")
-                    modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
-                    play("iteration.wav")
-
-                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
-
-                if modelLM is not None:
-                    try:
-                        # Generate responses
-                        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
-
-                        upsampled_captions = []
-                        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
-                            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
-                            upsampled_caption = None
-                            retrys = 1
-                            while upsampled_caption == None and retrys > 0:
-                                outputs = cascade_caption(modelLM, prompt[0], seed + (retrys * 20))
-                                upsampled_caption = collect_cascade_response(outputs)
-                                retrys -= 1
-                            seed += 1
-
-                            if upsampled_caption == None:
-                                upsampled_caption = prompt[0]
-
-                            upsampled_captions.append([upsampled_caption])
-                            play("iteration.wav")
-
-                        prompts = upsampled_captions
-                        del outputs, upsampled_caption
-                        clearCache()
-
-                        seed = seed - len(prompts)
-
-                        print()
-                        for i, prompt in enumerate(prompts[:4]):
-                            if isinstance(prompt[0], list):
-                                cascade = ""
-                                for i, layer in enumerate(prompt[0]):
-                                    cascade = f"{cascade}\n[#48a971]Layer: [#c4f129]{i+1} [#48a971]Prompt: [#494b9b]{layer}"
-
-                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt layers: [#494b9b]{cascade}")
-                            else:
-                                rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Cascading prompt failed, reverted to original: [#494b9b]{prompt[0]}")
-                            seed += 1
-
-                        if len(prompts) > 4:
-                            rprint(f"[#48a971]Remaining prompts generated but not displayed.")
-                    except:
-                        rprint(f"\n[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
-            except Exception as e:
-                if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
-                elif "GPU is required" in traceback.format_exc():
-                    rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
-                else:
-                    rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                    rprint(f"\n[#494b9b]Translation model could not be loaded.")
-        else:
-            rprint(f"\n[#494b9b]Translation model requires a GPU with at least 8GB of VRAM. You only have {round(cardMemory)}GB.")
-    else:
-        if modelLM is not None:
-            del modelLM
-            clearCache()
-            modelLM = None
-        
-        upsampled_captions = []
-        for prompt in prompts:
-            # Parse manual cascades
-            if "|" in prompt[0]:
-                upsampled_caption = [item.strip() for item in prompt[0].split("|")]
-                upsampled_captions.append([upsampled_caption])
+                seed = seed - len(prompts)
+                print()
+                for i, prompt in enumerate(prompts[:8]):
+                    rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Prompt: [#494b9b]{prompt[0]}")
+                    seed += 1
+                if len(prompts) > 8:
+                    rprint(f"[#48a971]Remaining prompts generated but not displayed.")
+                
+                cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
+                if cpuMemoryUnused <= 8:
+                    del modelLM
+                    clearCache()
+                    modelLM = None
+                elif loadedDevice == "cuda":
+                    mem = torch.cuda.memory_allocated() / 1e6
+                    modelLM["model"].to("cpu")
+                    # Wait until memory usage decreases
+                    while torch.cuda.memory_allocated() / 1e6 >= mem:
+                        time.sleep(1)
+        except Exception as e:
+            if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
+                rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
+            elif "GPU is required" in traceback.format_exc():
+                rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
             else:
-                upsampled_captions.append(prompt)
-
-        prompts = upsampled_captions
+                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                rprint(f"\n[#494b9b]Translation model could not be loaded.")
+    else:
+        if modelLM is not None:
+            del modelLM
+            clearCache()
+            modelLM = None
     
     return prompts, negatives
-
-
-def correct_list_distribution(input_string):
-    split_pattern = r"\|\s*\d+(?:\.\d+)?"
-    numbers_pattern = r"\|\s*(\d+(?:\.\d+)?)"
-
-    text_parts_split = re.split(split_pattern, input_string)
-    items = [text.strip() for text in text_parts_split if text.strip()]
-
-    numerical_values_raw = re.findall(numbers_pattern, input_string)
-    percentages = [float(value) for value in numerical_values_raw]
-
-    # Determine the minimum list length based on the smallest percentage increment
-    min_percentage = min(percentages)
-    list_length = round(1 / min_percentage)
-
-    # Initialize the result list
-    result_list = [None] * list_length
-    previous_threshold = 0
-
-    for i, (item, percentage) in enumerate(zip(items, percentages + [1])):
-        # Calculate the index to start inserting the current item
-        start_index = int(previous_threshold * list_length)
-        # Calculate the index to end inserting the current item
-        end_index = int(percentage * list_length)
-
-        # Fill the range of indexes for the current item
-        for j in range(start_index, end_index):
-            result_list[j] = item
-
-        previous_threshold = percentage
-
-    return result_list
 
 
 # String only manupulation of prompt and negative
-def managePrompts(prompts, negatives, loras, promptTuning):
+def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
     # Load lora names
     loraNames = [os.path.split(d["file"])[1] for d in loras if "file" in d]
 
@@ -1869,7 +1771,7 @@ def managePrompts(prompts, negatives, loras, promptTuning):
             # Defaults
             prefix = "pixel, pixel art"
             suffix = ""
-            negativeList = [negative, "empty background, frame, nude, nsfw, border, signature, letterbox"]
+            negativeList = [negative, "frame, blurry, nude, nsfw, border, signature, snowglobe, letterbox"]
 
             # Lora specific modifications
             if any(f"{_}.pxlm" in loraNames for _ in [
@@ -1909,6 +1811,28 @@ def managePrompts(prompts, negatives, loras, promptTuning):
                 prefix = f"{prefix}, texture"
                 suffix = f"{suffix}"
 
+            if use_ella:
+                if any(f"{_}.pxlm" in loraNames for _ in ["neogeo"]):
+                    suffix = f"{suffix}, NeoGeo video game style"
+                
+                if any(f"{_}.pxlm" in loraNames for _ in ["nes"]):
+                    suffix = f"{suffix}, NES video game style"
+                
+                if any(f"{_}.pxlm" in loraNames for _ in ["snes"]):
+                    suffix = f"{suffix}, SNES video game style"
+
+                if any(f"{_}.pxlm" in loraNames for _ in ["segagenesis"]):
+                    suffix = f"{suffix}, Sega Genesis video game style"
+
+                if any(f"{_}.pxlm" in loraNames for _ in ["playstation"]):
+                    suffix = f"{suffix}, Playstation 1 video game style"
+
+                if any(f"{_}.pxlm" in loraNames for _ in ["gameboy"]):
+                    suffix = f"{suffix}, Game Boy video game style"
+
+                if any(f"{_}.pxlm" in loraNames for _ in ["gameboyadvance"]):
+                    suffix = f"{suffix}, Game Boy Advance video game style"
+
             # Combine all prompt modifications
             out_prompts.append(f"{prefix}, {prompt}, {suffix}")
             out_negatives.append(", ".join(negativeList))
@@ -1945,13 +1869,17 @@ def get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, 
         text_embed_batch = []
         neg_text_embed_batch = []
 
-        # Pull original text embedding for comparison
+        prompts = data[condCount:condCount+condBatch]
+        negatives = negative_data[condCount:condCount+condBatch]
 
-        prompts = data[condCount]
-        negatives = negative_data[condCount]
+        uniform_conds = False
+        if all(x == prompts[0] for x in prompts):
+            uniform_conds = True
+            prompts = [prompts[0]]
+            negatives = [negatives[0]]
 
         for prompt in prompts:
-            text_embed = modelCS.get_learned_conditioning(prompt)
+            text_embed = modelCS.get_learned_conditioning(prompt[0]).squeeze()
 
             # UNUSED
             # Run through all attributes
@@ -1991,19 +1919,21 @@ def get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, 
                 rprint(f"[#494b9b]Applying [#48a971]{slider['neg_token']} <-> {slider['token']} [#494b9b]attribute control with [#48a971]{round(slider['weight']*100)}% [#494b9b]strength")
             
             # Apply attributes to text embedding
-            text_embed += slider_embed
-
-            # Repeat conditioning for batches
-            text_embed = text_embed.repeat(condBatch, 1, 1)
+            text_embed += slider_embed.squeeze()
+            if uniform_conds:
+                text_embed = text_embed.repeat(condBatch, 1, 1)
             text_embed_batch.append(text_embed)
 
         for negative in negatives:
-            neg_text_embed = modelCS.get_learned_conditioning(negative)
-
-            # Repeat conditioning for batches
-            neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
+            neg_text_embed = modelCS.get_learned_conditioning(negative[0]).squeeze()
+            if uniform_conds:
+                neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
             neg_text_embed_batch.append(neg_text_embed)
-
+        
+        if not uniform_conds:
+            text_embed_batch = [torch.stack(text_embed_batch, dim=0)]
+            neg_text_embed_batch = [torch.stack(neg_text_embed_batch, dim=0)]
+        
         conditioning.append(text_embed_batch)
         negative_conditioning.append(neg_text_embed_batch)
         shape.append([condBatch, 4, gHeight, gWidth])
@@ -2021,27 +1951,43 @@ def get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, 
 
 
 # Generate the text embeddings for prompts
-def get_text_embed_t5(data, negative_data, device, precision):
+def get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision):
     # Create conditioning values for each batch, then unload the text encoder
     negative_conditioning = []
     conditioning = []
 
-    # Compute conditioning tokens using prompt and negative
-    prompts = data[0]
-    negatives = negative_data[0]
-
-    prompt = prompts[-1]
-    if type(prompt) == list:
-        prompt = prompt[0]
-    negative = negatives[-1]
-    if type(negative) == list:
-        negative = negative[0]
-
     # Load CLIP
     modelCS.to(device)
 
-    text_embed_clip = modelCS.get_learned_conditioning(prompt)
-    neg_text_embed_clip = modelCS.get_learned_conditioning(negative)
+    condBatch = batch
+    condCount = 0
+    for run in range(runs):
+        # Compute conditioning tokens using prompt and negative
+        condBatch = min(condBatch, total_images - condCount)
+
+        text_embed_batch = []
+        neg_text_embed_batch = []
+
+        prompts = data[condCount:condCount+condBatch]
+        negatives = negative_data[condCount:condCount+condBatch]
+
+        uniform_conds = False
+        if all(x == prompts[0] for x in prompts):
+            uniform_conds = True
+            prompts = [prompts[0]]
+            negatives = [negatives[0]]
+
+        for prompt in prompts:
+            text_embed = modelCS.get_learned_conditioning(prompt[0])
+            text_embed_batch.append(text_embed)
+
+        for negative in negatives:
+            neg_text_embed = modelCS.get_learned_conditioning(negative[0])
+            neg_text_embed_batch.append(neg_text_embed)
+
+        conditioning.append(text_embed_batch)
+        negative_conditioning.append(neg_text_embed_batch)
+        condCount += condBatch
 
     # Move modelCS to CPU if necessary to free up GPU memory
     if device == "cuda":
@@ -2053,56 +1999,12 @@ def get_text_embed_t5(data, negative_data, device, precision):
 
     # Load T5
     t5_loaded = load_T5(device, precision)
+    global firstT5Encode
 
     if t5_loaded:
         if device == "cpu" or device == "mps":
             rprint(f"[#c4f129]Generating strong text guidance")
-
-
-        global firstT5Encode
-        # This is needed to remove a stupid warning from transformers/quanto, because the devs apparently can't, and its not included in standard logging
-        if firstT5Encode:
-            print("The following warning can be ignored, and will be removed automatically")
-            text_embed_t5 = modelT5(prompt).to(device)
-            sys.stdout.write('\x1b[1A')  # Move cursor up by one line
-            sys.stdout.write('\x1b[2K')  # Clear the line
-            sys.stdout.write('\x1b[1A')  # Move cursor up by one line
-            sys.stdout.write('\x1b[2K')  # Clear the line
-            firstT5Encode = False
-        else:
-            text_embed_t5 = modelT5(prompt).to(device)
-
-        neg_text_embed_t5 = modelT5(negative).to(device)
-
-        conditioning = [text_embed_t5, text_embed_clip]
-        negative_conditioning = [neg_text_embed_t5, neg_text_embed_clip]
-
-        del text_embed_t5
-        del text_embed_clip
-        del neg_text_embed_t5
-        del neg_text_embed_clip
         
-        unload_T5(device)
-        clearCache()
-    
-    else:
-        conditioning = [text_embed_clip]
-        negative_conditioning = [neg_text_embed_clip]
-
-    return conditioning, negative_conditioning
-
-
-# Generate the text embeddings for prompts
-def t5_to_clip(embed, negative_embed, steps, runs, batch, total_images, gWidth, gHeight, device, precision):
-    # Create conditioning values for each batch, then unload the text encoder
-    negative_conditioning = []
-    conditioning = []
-    shape = []
-
-    if len(embed) == 2:
-        # Use the specified precision scope
-        load_ella(device, precision)
-        sigmas = get_sigmas_ays(steps)
         condBatch = batch
         condCount = 0
         for run in range(runs):
@@ -2112,29 +2014,95 @@ def t5_to_clip(embed, negative_embed, steps, runs, batch, total_images, gWidth, 
             text_embed_batch = []
             neg_text_embed_batch = []
 
+            prompts = data[condCount:condCount+condBatch]
+            negatives = negative_data[condCount:condCount+condBatch]
+
+            uniform_conds = False
+            if all(x == prompts[0] for x in prompts):
+                uniform_conds = True
+                prompts = [prompts[0]]
+                negatives = [negatives[0]]
+
+            for i, prompt in enumerate(prompts):
+                # This is needed to remove a stupid warning from transformers/quanto, because the devs apparently can't, and its not included in standard logging
+                if firstT5Encode:
+                    print("The following warning can be ignored, and will be removed automatically")
+                    text_embed = modelT5(prompt[0]).to(device)
+                    sys.stdout.write('\x1b[1A')  # Move cursor up by one line
+                    sys.stdout.write('\x1b[2K')  # Clear the line
+                    sys.stdout.write('\x1b[1A')  # Move cursor up by one line
+                    sys.stdout.write('\x1b[2K')  # Clear the line
+                    firstT5Encode = False
+                else:
+                    text_embed = modelT5(prompt[0]).to(device)
+                conditioning[run][i] = [text_embed, conditioning[run][i]]
+
+            for i, negative in enumerate(negatives):
+                neg_text_embed = modelT5(negative[0]).to(device)
+                negative_conditioning[run][i] = [neg_text_embed, negative_conditioning[run][i]]
+
+            condCount += condBatch
+        
+        unload_T5(device)
+        clearCache()
+
+    return conditioning, negative_conditioning, uniform_conds
+
+
+# Generate the text embeddings for prompts
+def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision):
+    # Create conditioning values for each batch, then unload the text encoder
+    negative_conditioning = []
+    conditioning = []
+    shape = []
+
+    if len(embed[0][0]) == 2:
+        # Use the specified precision scope
+        load_ella(device, precision)
+        sigmas = get_sigmas_ays(steps)
+        condBatch = batch
+        condCount = 0
+        for run in range(runs):
+            # Compute conditioning tokens using prompt and negative
+            condBatch = min(condBatch, total_images - condCount)
+
+            timestep_text_embed_batch = []
+            timestep_neg_text_embed_batch = []
             for sigma in sigmas[:-1]:
+                text_embed_batch = []
+                neg_text_embed_batch = []
                 ts = timestep(sigma)
-                text_embed = torch.cat((modelELLA(ts, embed[0]), embed[1]), 1)
+                for t5_clip_cond_pair in embed[run]:
+                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
+                    if uniform_conds:
+                        text_embed = text_embed.repeat(condBatch, 1, 1)
+                    text_embed_batch.append(text_embed)
 
-                # Repeat conditioning for batches
-                text_embed = text_embed.repeat(condBatch, 1, 1)
-                text_embed_batch.append(text_embed)
+                for t5_clip_cond_pair in negative_embed[run]:
+                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
+                    if uniform_conds:
+                        neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
+                    neg_text_embed_batch.append(neg_text_embed)
+                
+                if not uniform_conds:
+                    text_embed_batch = torch.stack(text_embed_batch, dim=0)
+                    neg_text_embed_batch = torch.stack(neg_text_embed_batch, dim=0)
+                else:
+                    # Flatten lists of lists of tensors
+                    text_embed_batch = text_embed_batch[0]
+                    neg_text_embed_batch = neg_text_embed_batch[0]
 
-                # Negative
-                neg_text_embed = torch.cat((modelELLA(ts, negative_embed[0]), negative_embed[1]), 1)
-
-                # Repeat conditioning for batches
-                neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
-                neg_text_embed_batch.append(neg_text_embed)
+                timestep_text_embed_batch.append(text_embed_batch)
+                timestep_neg_text_embed_batch.append(neg_text_embed_batch)
 
             del text_embed
             del neg_text_embed
 
-            conditioning.append(text_embed_batch)
-            negative_conditioning.append(neg_text_embed_batch)
+            conditioning.append(timestep_text_embed_batch)
+            negative_conditioning.append(timestep_neg_text_embed_batch)
             shape.append([condBatch, 4, gHeight, gWidth])
             condCount += condBatch
-
+        
         unload_ella(device)
         clearCache()
     else:
@@ -2144,8 +2112,27 @@ def t5_to_clip(embed, negative_embed, steps, runs, batch, total_images, gWidth, 
             # Compute conditioning tokens using prompt and negative
             condBatch = min(condBatch, total_images - condCount)
 
-            conditioning.append(embed)
-            negative_conditioning.append(negative_embed)
+            text_embed_batch = []
+            neg_text_embed_batch = []
+            ts = timestep(sigma)
+            for t5_clip_cond_pair in embed[run]:
+                text_embed = t5_clip_cond_pair[1]
+                if uniform_conds:
+                    text_embed = text_embed.repeat(condBatch, 1, 1)
+                text_embed_batch.append(text_embed)
+
+            for t5_clip_cond_pair in negative_embed[run]:
+                neg_text_embed = t5_clip_cond_pair[1]
+                if uniform_conds:
+                    neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
+                neg_text_embed_batch.append(neg_text_embed)
+            
+            if not uniform_conds:
+                text_embed_batch = torch.stack(text_embed_batch, dim=0)
+                neg_text_embed_batch = torch.stack(neg_text_embed_batch, dim=0)
+
+            conditioning.append(text_embed_batch)
+            negative_conditioning.append(neg_text_embed_batch)
             shape.append([condBatch, 4, gHeight, gWidth])
             condCount += condBatch
     return conditioning, negative_conditioning, shape
@@ -2270,7 +2257,7 @@ def paletteGen(prompt, colors, seed, device, precision):
     width = 512+((512/base)*(colors-base))
 
     # Generate text-to-image conversion with specified parameters
-    for _ in txt2img(prompt, "", False, False, False, int(width), 512, 1, False, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
+    for _ in txt2img(prompt, "", False, False, False, int(width), 512, 1, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
         image = _[1]
 
     # Perform k-centroid downscaling on the image
@@ -2431,7 +2418,7 @@ def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning
     data = []
     negative_data = []
     for i, prompt_batch in enumerate(prompts):
-        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning)
+        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning, use_ella)
         data.append(temp_p)
         negative_data.append(temp_n)
     seed_everything(seed)
@@ -2527,8 +2514,8 @@ def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning
             else:
                 cardMemory = psutil.virtual_memory().available / (1024 ** 3)
             if use_ella and cardMemory >= 4:
-                t5_clip_embed, t5_clip_neg_embed = get_text_embed_t5(data, negative_data, device, precision)
-                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
+                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
             else:
                 if use_ella:
                     rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 4GB of VRAM or unused RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
@@ -2606,14 +2593,16 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                 "kl_optimal" # scheduler
             )):
                 if preview:
+                    message = [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
                     # Render and send image previews
-                    displayOut = []
-                    for i in range(batch):
-                        x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
-                        name = str(seed+i)
-                        displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                    yield [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}},
-                           {"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
+                    if step % round((math.sqrt(W * H) / 448)) == 0:
+                        displayOut = []
+                        for i in range(batch):
+                            x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
+                            name = str(seed+i)
+                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                        message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
+                    yield message
             
             for i in range(batch):
                 x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
@@ -2682,7 +2671,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
 
 
 # Generate image from text prompt
-def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, upscale, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
+def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
     
     # Check gpu availability
@@ -2710,7 +2699,9 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Derive steps, cfg, lcm weight from quality setting
     global modelPath
     # Curves defined by https://www.desmos.com/calculator/kny0embnkg
-    steps = round(3.4 + ((quality ** 2) / 1.5))
+    steps = round(3.4 + ((quality ** 2) / 2))
+    # Adjust for size
+    steps = round(steps * (1 + ((((size - 320) / 320) - 1) / 5) ** 2))
     scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
@@ -2723,36 +2714,12 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     if math.sqrt(gWidth * gHeight) < 24:
         use_ella = False
 
-    if math.sqrt(gWidth * gHeight) > 104:
-        resfix_weight = round(max(4, min(((((math.sqrt(gWidth * gHeight)/10) - 10) ** 3) / 3000) + 4, 7.5)) * 10)
-        loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": resfix_weight})
-
     # Composition and lighting modifications
     loras = manageComposition(lighting, composition, loras)
 
     # Resolution adapter
     if math.sqrt(gWidth * gHeight) < 60 and pixelSize == 8:
         loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
-
-    # Composition enhancement settings (high res fix)
-    pre_steps = steps
-    up_steps = 1
-    if math.sqrt(gWidth * gHeight) > 104 and upscale:
-        lower = 50
-        aspect = gWidth / gHeight
-        gx = gWidth
-        gy = gHeight
-        # Calculate initial image size from given large image
-        # Targets resolutions between 64x64 and 96x96 while respecting aspect ratios
-        # Interactive example here: https://editor.p5js.org/Astropulse/full/Co7CGTAnm
-        gWidth = int((lower * max(1, aspect)) + ((gy / 7) * aspect))
-        gHeight = int((lower * max(1, 1 / aspect)) + ((gx / 7) * (1 / aspect)))
-
-        # Curves defined by https://www.desmos.com/calculator/kny0embnkg
-        pre_steps = round(steps * ((10 - (((quality - 1.1) ** 2) / 15)) / 10))
-        up_steps = round(steps * max(0.42, ((((quality - 8.7) ** 2) / 6) + 6.5) / 10))
-    else:
-        upscale = False
 
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
@@ -2761,7 +2728,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     data = []
     negative_data = []
     for i, prompt_batch in enumerate(prompts):
-        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning)
+        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning, use_ella)
         data.append(temp_p)
         negative_data.append(temp_n)
 
@@ -2769,10 +2736,6 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
     rprint(f"\n[#48a971]Text to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
 
-    if math.sqrt((W // 8) * (H // 8)) > 104 and upscale:
-        rprint(f"[#48a971]Pre-generating[white] composition image at [#48a971]{gWidth * 8}[white]x[#48a971]{gHeight * 8} [white]([#48a971]{(gWidth * 8) // pixelSize}[white]x[#48a971]{(gHeight * 8) // pixelSize}[white] pixels)")
-
-    start_code = None
     sampler = "pxlcm"
 
     global model
@@ -2852,8 +2815,8 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
             else:
                 cardMemory = psutil.virtual_memory().available / (1024 ** 3)
             if use_ella and cardMemory >= 4:
-                t5_clip_embed, t5_clip_neg_embed = get_text_embed_t5(data, negative_data, device, precision)
-                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, pre_steps, runs, batch, total_images, gWidth, gHeight, device, precision)
+                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision)
             else:
                 if use_ella:
                     rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 4GB of VRAM or unused RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
@@ -2870,73 +2833,26 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                 # Generate samples using the model
                 for step, samples_ddim in enumerate(
                     model.sample(
-                        S=pre_steps,
+                        S=steps,
                         conditional_guidance=conditioning[run],
                         seed=seed,
                         shape=shape[run],
-                        verbose=False,
                         unconditional_guidance_scale=scale,
                         unconditional_guidance=negative_conditioning[run],
-                        eta=0.0,
-                        x_T=start_code,
                         sampler=sampler,
                     )
                 ):
                     if preview:
+                        message = [{"action": "display_title", "type": "txt2img", "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
                         # Render and send image previews
-                        displayOut = []
-                        for i in range(batch):
-                            x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
-                            name = str(seed+i)
-                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                        yield [{"action": "display_title", "type": "txt2img", "value": {"text": f"Generating... {step}/{pre_steps} steps in batch {run+1}/{runs}"}},
-                               {"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
-
-                if upscale:
-                    # RECONDITION SAMPLING !!!!!!!!!
-                    if use_ella and cardMemory >= 4:
-                        conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, up_steps, runs, batch, total_images, gWidth, gHeight, device, precision)
-
-                    # Apply 'cropped' lora for enhanced composition at high resolution
-                    crop_weight = max(3, min(round(math.sqrt(max(1, 2 * ((math.sqrt((W // 8) * (H // 8))/10) - 9))) + 1, 2), 7))
-                    loraPair = {"file": os.path.join(os.path.join(modelPath, "LECO"), "crop.leco"), "weight": crop_weight}
-                    loras.append(loraPair)
-                    decryptedFiles.append("none")
-                    _, loraName = os.path.split(loraPair["file"])
-                    loadedLoras.append(load_lora(loraPair["file"], model))
-                    loadedLoras[len(loadedLoras)-1].multiplier = loraPair["weight"]
-                    # Prepare for inference
-                    register_lora_for_inference(loadedLoras[len(loadedLoras)-1])
-                    apply_lora()
-
-                    # Upscale latents using bilinear interpolation
-                    samples_ddim = torch.nn.functional.interpolate(samples_ddim, size=(H // 8, W // 8), mode="bilinear")
-                    # Encode latents
-                    encoded_latent = model.stochastic_encode(samples_ddim, torch.tensor([up_steps]).to(device), seed, 0.0, int(up_steps * 1.5))
-                    # Sample for up_steps
-                    for step, samples_ddim in enumerate(
-                        model.sample(
-                            up_steps,
-                            conditioning[run],
-                            encoded_latent,
-                            unconditional_guidance_scale=scale,
-                            unconditional_guidance=negative_conditioning[run],
-                            sampler="ddim",
-                        )
-                    ):
-                        if preview:
-                            # Render and send image previews
+                        if step % round((math.sqrt(W * H) / 448)) == 0:
                             displayOut = []
                             for i in range(batch):
                                 x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
                                 name = str(seed+i)
                                 displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                            yield [{"action": "display_title", "type": "txt2img", "value": {"text": f"Generating... {step}/{up_steps} steps in batch {run+1}/{runs}"}},
-                                   {"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
-
-                    # Remove crop lora
-                    remove_lora_for_inference(loadedLoras[len(loadedLoras)-1])
-                    loadedLoras.pop()
+                            message.append({"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
+                        yield message
 
                 # Render final images in batch
                 for i in range(batch):
@@ -2947,7 +2863,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
                     seeds.append(str(seed))
 
-                    name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, upscale, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed, post])) & 0x7FFFFFFFFFFFFFFF)
+                    name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed, post])) & 0x7FFFFFFFFFFFFFFF)
                     output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                     seed += 1
@@ -3017,16 +2933,10 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     if math.sqrt((H // 8) * (W // 8)) < 24:
         use_ella = False
 
-    if math.sqrt((W // 8) * (H // 8)) > 104:
-        loras.append({"file": os.path.join(modelPath, "resfix.lcm"), "weight": 40})
-    
-        # Apply 'cropped' lora for enhanced composition at high resolution
-        crop_weight = max(3, min(round(math.sqrt(max(1, 2 * ((math.sqrt((W // 8) * (H // 8))/10) - 9))) + 1, 2), 7))
-        if True:
-            loras.append({"file": os.path.join(os.path.join(modelPath, "LECO"), "crop.leco"), "weight": crop_weight})
-
     # Curves defined by https://www.desmos.com/calculator/kny0embnkg
-    steps = round(9 + (((quality-1.85) ** 2) * 1.1))
+    steps = round(3.4 + ((quality ** 2) / 1.6))
+    # Adjust for size
+    steps = round(steps * max(1, 1 + ((((size - 320) / 320) - 1) / 5) ** 2))
     scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
@@ -3046,14 +2956,14 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     data = []
     negative_data = []
     for i, prompt_batch in enumerate(prompts):
-        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning)
+        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning, use_ella)
         data.append(temp_p)
         negative_data.append(temp_n)
     seed_everything(seed)
 
     rprint(f"\n[#48a971]Image to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
 
-    sampler = "ddim"
+    sampler = "pxlcm"
 
     global model
     global modelCS
@@ -3162,8 +3072,8 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
             else:
                 cardMemory = psutil.virtual_memory().available / (1024 ** 3)
             if use_ella and cardMemory >= 4:
-                t5_clip_embed, t5_clip_neg_embed = get_text_embed_t5(data, negative_data, device, precision)
-                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
+                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
             else:
                 if use_ella:
                     rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 4GB of VRAM or unused RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
@@ -3185,18 +3095,21 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                         encoded_latent[run],
                         unconditional_guidance_scale=scale,
                         unconditional_guidance=negative_conditioning[run],
+                        denoise=strength,
                         sampler=sampler,
                     )
                 ):
                     if preview:
+                        message = [{"action": "display_title", "type": "img2img", "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
                         # Render and send image previews
-                        displayOut = []
-                        for i in range(batch):
-                            x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
-                            name = str(seed+i)
-                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                        yield [{"action": "display_title", "type": "img2img", "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}},
-                               {"action": "display_image", "type": "img2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}}]
+                        if step % round((math.sqrt(W * H) / 448)) == 0:
+                            displayOut = []
+                            for i in range(batch):
+                                x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
+                                name = str(seed+i)
+                                displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                            message.append({"action": "display_image", "type": "img2img", "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
+                        yield message
 
                 # Render final images in batch
                 for i in range(batch):
@@ -3243,65 +3156,28 @@ def prompt2prompt(path, prompt, negative, generations, seed):
     global modelLM
     global sounds
     global modelPath
+    global loadedDevice
+
+    # Check gpu availability
+    if torch.cuda.is_available():
+        loadedDevice = "cuda"
+    elif torch.backends.mps.is_available():
+        loadedDevice = "mps"
+    else:
+        loadedDevice = "cpu"
+        rprint(f"\n[#ab333d]GPU is not responding, loading model in CPU mode")
+            
     modelPath = path
 
-    prompts = [prompt] * generations
-    seeds = []
+    prompts = [[prompt]] * generations
+    negatives = [[negative]] * generations
 
-    try:
-        # Load LLM for prompt upsampling
-        if modelLM == None:
-            print("\nLoading prompt translation language model")
-            modelLM = load_chat_pipeline(os.path.join(modelPath, "LLM"))
-            play("iteration.wav")
+    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, True)
 
-            rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
-    except Exception as e:
-        if "torch.cuda.OutOfMemoryError" in traceback.format_exc():
-            rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
-        else:
-            rprint(f"\n[#494b9b]Translation model could not be loaded.")
-    try:
-        # Generate responses
-        rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{generations} [white]enhanced prompts")
-
-        upsampled_captions = []
-        count = 0
-        for prompt in clbar(prompts, name="Enhancing", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
-            # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
-            upsampled_caption = None
-            retrys = 5
-            while upsampled_caption == None and retrys > 0:
-                outputs = upsample_caption(modelLM, prompt, seed)
-                upsampled_caption = collect_response(outputs)
-                retrys -= 1
-            seeds.append(str(seed))
-            seed += 1
-            count += 1
-
-            if upsampled_caption == None:
-                upsampled_caption = prompt
-
-            upsampled_captions.append(upsampled_caption)
-            if generations > 1 and count < generations:
-                play("iteration.wav")
-
-        prompts = upsampled_captions
-
-        cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-        usedMemory = cardMemory - (torch.cuda.mem_get_info()[0] / 1073741824)
-
-        if cardMemory - usedMemory < 4:
-            del modelLM
-            clearCache()
-            modelLM = None
-        else:
-            clearCache()
-    except:
-        rprint(f"[#494b9b]Prompt enhancement failed unexpectedly. Prompts will not be edited.")
+    prompts = sum(prompts, [])
 
     play("batch.wav")
-    rprint(f"[#c4f129]Prompt enhancement completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
+    rprint(f"[#c4f129]Prompt enhancement completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
 
     return prompts
 
@@ -3522,7 +3398,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3581,7 +3458,7 @@ async def server(websocket):
                             loras = values["loras"]
                             loras.append({"file": os.path.join(lecoPath, "detail.leco"), "weight": values["detail"] * -10})
                             controlnets = [{"model_file": os.path.join(netPath, "Tile.safetensors"), "image": image_blur, "weight": 0.5}, {"model_file": os.path.join(netPath, "Composition.safetensors"), "image": image, "weight": 0.5}]
-
+                            
                             for result in neural_inference(
                                 modelData["file"],
                                 title,
@@ -3614,7 +3491,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3703,7 +3581,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3790,7 +3669,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3833,7 +3713,6 @@ async def server(websocket):
                                 values["width"],
                                 values["height"],
                                 values["pixel_size"],
-                                values["enhance_composition"],
                                 values["quality"],
                                 values["scale"],
                                 values["lighting"],
@@ -3852,7 +3731,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": "txt2img", "value": {"text": "Generation complete"}}))
@@ -3933,7 +3813,6 @@ async def server(websocket):
                                             netPath = os.path.join(modelPath, "CONTROLNET")
                                             controlnets.append({"model_file": os.path.join(netPath, f"{controlnet['model']}.safetensors"), "image": image, "weight": controlnet["weight"]/100})
                                         
-
                             for result in neural_inference(
                                 modelData["file"],
                                 title,
@@ -3965,7 +3844,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3999,6 +3879,7 @@ async def server(websocket):
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generating..."}}))
+                            
                             for result in img2img(
                                 values["prompt"],
                                 values["negative"],
@@ -4028,7 +3909,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generation complete"}}))
@@ -4141,7 +4023,8 @@ async def server(websocket):
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
-                                    await websocket.send(json.dumps(result[1]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
