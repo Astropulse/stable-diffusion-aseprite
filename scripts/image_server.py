@@ -349,7 +349,6 @@ def get_precision(device, precision):
                     model_precision = torch.float32
                     vae_precision = torch.float32
                     
-
     else:
         # Fallback to fp32 precision
         precision = "fp32"
@@ -360,7 +359,7 @@ def get_precision(device, precision):
 
 
 # Determine correct autocast mode
-def autocast(device, precision, dtype = torch.float16):
+def autocast(device, precision, dtype = torch.float32):
     if precision == "fp8":
         dtype = torch.bfloat16
     if device == "cuda" and torch.cuda.is_available():
@@ -2505,6 +2504,7 @@ def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning
                 for run in range(runs):
                     encoded_latent.append(None)
 
+        with autocast(device, precision, torch.float32):
             # Concepts containing attributes and weights (can contain negative attributes or not).
             #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
             attributes = {"sliders": []}
@@ -2809,7 +2809,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     attributes = {"sliders": []}      
     
     with torch.no_grad():
-        with precision_scope:
+        with autocast(device, precision, torch.float32):
             if device == "cuda" and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
             else:
@@ -3063,6 +3063,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                 ))
                 latentCount += latentBatch
 
+        with autocast(device, precision, torch.float32):
             # Concepts containing attributes and weights (can contain negative attributes or not).
             #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
             attributes = {"sliders": []}
