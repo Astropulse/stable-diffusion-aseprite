@@ -10,6 +10,9 @@ from PIL import ImageOps
 import numpy as np
 import torch
 
+from ldm.hidiffusion import ApplyRAUNet
+import math
+
 
 # returns a conditioning with a controlnet applied to it, ready to pass it to a KSampler
 def apply_controlnet(conditioning, control_net, image, strength):
@@ -87,6 +90,40 @@ def load_controlnet(
         
     # Patch the model
     lora_model_patcher.patch_model()
+
+
+    size = round(math.sqrt(width * height))
+
+    use_hidiff = size >= 80
+
+    # RAUnet settings
+    percent_end = (((((size - 80) / 8) * 5) ** 0.33) - 0.2) / 10
+    ra_use_blocks = ("3", "8")
+    if use_hidiff:
+        ra_range = (0.0, percent_end) # (0.0, 0.1) for 80x80 - (0.0, 0.2) for 96x96 - (0.0, 0.3) for 128x128 - (0.0, 0.4) for 192x192 - (0.0, 0.5) for 320x240
+    else:
+        ra_range = (1.0, 0.0)
+
+    # Cross Attention blocks
+    percent_end = ((((size - 124) / 8) / 2.2) ** 0.33) / 10
+    ca_use_blocks = ("3", "6") # empty for low, 3 for 320x240
+    if size >= 160 and use_hidiff:
+        ca_range = (0.0, percent_end) # (1.0, 0.0) for < 112x112 - (0.0, 0.05) for 128x128 - (0.0, 0.15) for 192x192 - (0.0, 0.2) for 320x240
+    else:
+        ca_range = (1.0, 0.0)
+
+    lora_model_patcher = ApplyRAUNet().patch(
+            True,  # noqa: FBT003
+            lora_model_patcher,
+            *ra_use_blocks,
+            "percent",
+            *ra_range,
+            False,  # noqa: FBT003
+            "bicubic",
+            *ca_range,
+            *ca_use_blocks,
+            "bicubic",
+        )
 
     return lora_model_patcher, cldm_conditioning, cldm_negative_conditioning
 

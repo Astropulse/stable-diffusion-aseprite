@@ -770,9 +770,9 @@ class UNet(DDPM):
         # mswmsa attention
         attn_use_blocks = parse_blocks("input", "1, 2")
         attn_use_blocks |= parse_blocks("middle", "")
-        attn_use_blocks |= parse_blocks("output", "9,10,11")
+        attn_use_blocks |= parse_blocks("output", "11,10,9")
         transformer_options["attn_use_blocks"] = attn_use_blocks
-        transformer_options["attn_range"] = (0.0, 1.0)
+        transformer_options["attn_range"] = (0.2, 1.0)
 
         if sampler == "ddim":
             for samples in self.ddim_sampling(

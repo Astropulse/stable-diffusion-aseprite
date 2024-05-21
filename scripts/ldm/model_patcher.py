@@ -175,7 +175,16 @@ class ModelPatcher:
     def model_dtype(self):
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
-
+        
+    def get_model_object(self, name):
+        if name in self.object_patches:
+            return self.object_patches[name]
+        else:
+            if name in self.object_patches_backup:
+                return self.object_patches_backup[name]
+            else:
+                return ldm.utils.get_attr(self.model, name)
+            
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         p = set()
         for k in patches:
