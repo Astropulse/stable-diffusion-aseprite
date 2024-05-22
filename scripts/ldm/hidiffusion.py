@@ -1,7 +1,7 @@
 import sys
 
 import torch
-import ldm.modules as openaimodel
+import ldm.cldm_models as openaimodel
 
 from .utils import *
 
@@ -77,7 +77,7 @@ def hd_forward_timestep_embed(ts, x, emb, *args: list, **kwargs: dict):
     return x
 
 
-OrigUpsample, OrigDownsample = openaimodel.UnetUpsample, openaimodel.UnetDownsample
+OrigUpsample, OrigDownsample = openaimodel.Upsample, openaimodel.Downsample
 
 
 class HDUpsample(OrigUpsample):
@@ -144,8 +144,8 @@ class HDDownsample(OrigDownsample):
 
 
 # Necessary to monkeypatch the built in blocks before any models are loaded.
-openaimodel.UnetUpsample = HDUpsample
-openaimodel.UnetDownsample = HDDownsample
+openaimodel.Upsample = HDUpsample
+openaimodel.Downsample = HDDownsample
 
 
 class ApplyRAUNet:
