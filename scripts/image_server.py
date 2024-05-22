@@ -8,12 +8,11 @@ try:
     import numpy as np
     from random import randint
     from omegaconf import OmegaConf
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    from PIL import Image, ImageEnhance, ImageFilter
     import cv2
     from itertools import product
     from einops import rearrange
     from pytorch_lightning import seed_everything
-    from transformers import BlipProcessor, BlipForConditionalGeneration, AutoImageProcessor, AutoModelForDepthEstimation, set_seed, T5Tokenizer, T5ForConditionalGeneration
     from typing import Optional
     from safetensors.torch import load_file
     from cryptography.fernet import Fernet
@@ -27,16 +26,13 @@ try:
         apply_lora,
         assign_lora_names_to_compvis_modules,
         load_lora,
-        load_lora_raw,
         register_lora_for_inference,
         remove_lora_for_inference,
     )
     from conditioning.model import ELLA, T5TextEmbedder
     from ddpm import get_sigmas_ays
-    from upsample_prompts import load_chat_pipeline, upsample_caption, collect_response, cascade_caption, collect_cascade_response
     from oe_utils import outline_expansion, match_color
     import segmenter
-    import preprocessors.pose_util as pose_util
     import hitherdither
 
     # Import PyTorch functions
@@ -55,9 +51,6 @@ try:
     from websockets import serve
     from io import BytesIO
     import base64
-
-    # Import CLDM requirements
-    from cldm_inference import load_controlnet, sample_cldm, unload_cldm
 
     # Import console management libraries
     from rich import print as rprint
@@ -118,12 +111,6 @@ global modelFS
 global modelTA
 # Pixel VAE
 global modelPV
-# Language model
-global modelLM
-modelLM = None
-# Image classifier
-global modelBLIP
-modelBLIP = None
 global modelType
 global running
 global loadedDevice
@@ -136,13 +123,9 @@ system_models = ["quality", "adapter", "crop", "detail", "brightness", "contrast
 global sounds
 sounds = False
 
-expectedVersion = "11.5.0"
+expectedVersion = "lite-1.0.0"
 
 global maxSize
-
-# model loading globals
-global split_loaded
-split_loaded = False
 
 # For testing only, limits memory usage to "maxMemory"
 maxSize = 512
@@ -447,52 +430,6 @@ def patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV):
     return model, modelFS, modelTA, modelPV
 
 
-# Attempts to remove words repeated at the end of a string
-def remove_repeated_words(string):
-    # Splitting the string by spaces to preserve original punctuation
-    parts = string.split()
-    normalized_parts = []
-    separators = []
-    
-    # Normalize parts and remember original separators
-    for part in parts:
-        if part.endswith(","):
-            normalized_parts.append(part[:-1])
-            separators.append(", ")
-        else:
-            normalized_parts.append(part)
-            separators.append(" ")
-    
-    # Check for repetitions from the end
-    if len(normalized_parts) > 1:
-        i = -2
-        while -i <= len(normalized_parts) and normalized_parts[-1] == normalized_parts[i]:
-            i -= 1
-        if i != -2:
-            # Keep one instance of the repeated word
-            final_parts = normalized_parts[:i+2]
-        else:
-            final_parts = normalized_parts
-    else:
-        final_parts = normalized_parts
-    
-    # Reconstruct the string using the original separators
-    reconstructed_string = ""
-    for i, part in enumerate(final_parts):
-        if i < len(separators) - 1:  # Avoid index out of range
-            reconstructed_string += part + separators[i]
-        else:
-            reconstructed_string += part  # Last part, no separator
-    
-    # Handling trailing separators if the last part was a repetition
-    if reconstructed_string.endswith(", "):
-        reconstructed_string = reconstructed_string[:-2]
-    elif reconstructed_string.endswith(" "):
-        reconstructed_string = reconstructed_string[:-1]
-    
-    return reconstructed_string
-
-
 # Print image in console
 def climage(image, alignment, *args):
     # Get console bounds with a small margin - better safe than sorry
@@ -742,103 +679,6 @@ def resize_image(image, target_size):
     return image
 
 
-# Use FFT to extract image high frequencies
-def extract_high_frequencies(image, cutoff=0.1, percentile=85):
-    # Load the image and convert to grayscale
-    img = image.convert('L')
-    img_array = np.array(img)
-
-    # Compute the 2-dimensional FFT
-    fft_result = np.fft.fft2(img_array)
-    fft_shifted = np.fft.fftshift(fft_result)
-    
-    # Create a low-pass filter mask
-    rows, cols = img_array.shape
-    crow, ccol = rows // 2 , cols // 2  # Center point
-    low_pass_mask = np.zeros((rows, cols), dtype=int)
-    low_pass_mask[crow-int(crow*cutoff):crow+int(crow*cutoff), ccol-int(ccol*cutoff):ccol+int(ccol*cutoff)] = 1
-
-    # Create high-pass filter by subtracting low-pass filter from an all-ones matrix
-    high_pass_mask = 1 - low_pass_mask
-
-    # Apply the high-pass filter to the shifted FFT
-    filtered_fft = fft_shifted * high_pass_mask
-    
-    # Inverse FFT shift and inverse FFT
-    ifft_shifted = np.fft.ifftshift(filtered_fft)
-    img_back = np.fft.ifft2(ifft_shifted)
-    img_back = np.log(1 + np.abs(img_back))
-
-    img_back = 255 * (img_back - img_back.min()) / (img_back.max() - img_back.min())
-    threshold = np.percentile(img_back, percentile)
-
-    final_img = np.where(img_back >= threshold, 255, 0)
-    return Image.fromarray(final_img.astype(np.uint8))
-
-
-# Use OpenPose for pose estimation
-def pose_estimation(image, model_path):
-    scaled_img = resize_image(image, 512)
-    img_array = np.array(scaled_img)
-    # Load the estimation models
-    body_estimation = pose_util.Body(model_path)
-
-    # Perform pose estimation
-    candidate, subset = body_estimation(img_array)
-    canvas = np.zeros(img_array.shape, dtype=np.uint8)
-    canvas = Image.fromarray(pose_util.draw_bodypose(canvas, candidate, subset))
-
-    pose_data = {
-        'candidate': candidate.tolist(),
-        'subset': subset.tolist()
-    }
-
-    return canvas, pose_data
-
-
-# Use DepthAnything for depth estimation
-def depth_estimation(image, model_path):
-    image = image.convert("RGB")
-    image_processor = AutoImageProcessor.from_pretrained(model_path)
-    model = AutoModelForDepthEstimation.from_pretrained(model_path)
-
-    # prepare image for the model
-    inputs = image_processor(images=image, return_tensors="pt")
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-        predicted_depth = outputs.predicted_depth
-
-    # interpolate to original size
-    prediction = torch.nn.functional.interpolate(
-        predicted_depth.unsqueeze(1),
-        size=image.size[::-1],
-        mode="bicubic",
-        align_corners=False,
-    )
-
-    # visualize the prediction
-    output = prediction.squeeze().cpu().numpy()
-    formatted = (output * 255 / np.max(output)).astype("uint8")
-    return Image.fromarray(formatted)
-
-
-# Run blip captioning for each image in a set with optional starting prompts
-def caption_images(blip, images, prompt=None):
-    processor = blip["processor"]
-    model = blip["model"]
-
-    outputs = []
-    for image in images:
-        if prompt is not None:
-            inputs = processor(image, prompt, return_tensors="pt")
-        else:
-            inputs = processor(image, return_tensors="pt")
-
-        outputs.append(processor.decode(model.generate(**inputs, max_new_tokens=30)[0], skip_special_tokens=True))
-    return outputs
-
-
 # Flatten a model into its layers
 def flatten(el):
     # Flatten nested elements by recursively traversing through children
@@ -857,21 +697,6 @@ def adjust_gamma(image, gamma=1.0):
 
     # Apply the gamma correction using the lookup table
     return image.point(gamma_table)
-
-
-# Load blip image captioning model
-def load_blip(path):
-    timer = time.time()
-    print("\nLoading vision model")
-    try:
-        processor = BlipProcessor.from_pretrained(path)
-        model = BlipForConditionalGeneration.from_pretrained(path)
-        play("iteration.wav")
-        rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
-        return {"processor": processor, "model": model}
-    except Exception as e:
-        rprint(f"[#ab333d]{traceback.format_exc()}\n\nBLIP could not be loaded, this may indicate a model has not been downloaded fully, or you have run out of RAM.")
-        return None
 
 
 def load_ella(device, precision):
@@ -967,17 +792,13 @@ def load_model_from_config(model, verbose=False):
 
 
 # Load stable diffusion 1.5 format model
-def load_model(modelFileString, config, device, precision, optimized, split = True):
+def load_model(modelFileString, config, device, precision, optimized):
     global modelName
     global modelSettings
 
-    modelParams = {"file": modelFileString, "device": device, "precision": precision, "optimized": optimized, "split": split}
+    modelParams = {"file": modelFileString, "device": device, "precision": precision, "optimized": optimized}
     if modelSettings != modelParams:
         timer = time.time()
-
-        global split_loaded
-        if not split_loaded:
-            unload_cldm()
 
         if device == "cuda" and not torch.cuda.is_available():
             if torch.backends.mps.is_available():
@@ -1019,25 +840,24 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
         sd = load_model_from_config(f"{os.path.join(modelPath, modelFile)}")
 
         # Separate the input and output blocks from the state dictionary
-        if split:
-            li, lo = [], []
-            for key, value in sd.items():
-                sp = key.split(".")
-                if (sp[0]) == "model":
-                    if "input_blocks" in sp:
-                        li.append(key)
-                    elif "middle_block" in sp:
-                        li.append(key)
-                    elif "time_embed" in sp:
-                        li.append(key)
-                    else:
-                        lo.append(key)
+        li, lo = [], []
+        for key, value in sd.items():
+            sp = key.split(".")
+            if (sp[0]) == "model":
+                if "input_blocks" in sp:
+                    li.append(key)
+                elif "middle_block" in sp:
+                    li.append(key)
+                elif "time_embed" in sp:
+                    li.append(key)
+                else:
+                    lo.append(key)
 
-            # Reorganize the state dictionary keys to match the model structure
-            for key in li:
-                sd["model1." + key[6:]] = sd.pop(key)
-            for key in lo:
-                sd["model2." + key[6:]] = sd.pop(key)
+        # Reorganize the state dictionary keys to match the model structure
+        for key in li:
+            sd["model1." + key[6:]] = sd.pop(key)
+        for key in lo:
+            sd["model2." + key[6:]] = sd.pop(key)
 
         # Load the model configuration
         config = OmegaConf.load(f"{config}")
@@ -1051,14 +871,13 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
             modelPV = load_pixelvae_model(decoder_path, device, "eVWtlIBjTRr0-gyZB0smWSwxCiF8l4PVJcNJOIFLFqE=")
 
         # Instantiate and load the main model
-        if split:
-            global model
-            model = instantiate_from_config(config.model_unet)
-            _, _ = model.load_state_dict(sd, strict=False)
-            model.eval()
-            model.unet_bs = 1
-            model.cdevice = device
-            model.turbo = turbo
+        global model
+        model = instantiate_from_config(config.model_unet)
+        _, _ = model.load_state_dict(sd, strict=False)
+        model.eval()
+        model.unet_bs = 1
+        model.cdevice = device
+        model.turbo = turbo
 
         # Instantiate and load the conditional stage model
         global modelCS
@@ -1086,8 +905,7 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
 
         # Handle float16 and float32 conditions
         if device == "cuda" and precision != "fp8":
-            if split:
-                model.to(model_precision)
+            model.to(model_precision)
             modelCS.to(model_precision)
             modelTA.to(vae_precision)
             if not optimized:
@@ -1095,8 +913,7 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
             precision = model_precision
         # Handle float8 condition
         elif device == "cuda":
-            if split:
-                model.to(model_precision)
+            model.to(model_precision)
             for layer in flatten(modelCS):
                 if isinstance(layer, torch.nn.Linear):
                     layer.to(model_precision)
@@ -1106,8 +923,7 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
             precision = model_precision
             rprint(f"Applied [#48a971]torch.fp8[/] to model")
 
-        if split:
-            assign_lora_names_to_compvis_modules(model, modelCS)
+        assign_lora_names_to_compvis_modules(model, modelCS)
 
         modelName = modelFileString
         modelSettings = modelParams
@@ -1116,11 +932,7 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
         play("iteration.wav")
         rprint(f"[#c4f129]Loaded model to [#48a971]{device}[#c4f129] with [#48a971]{precision} precision[#c4f129] in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
         
-        if split:
-            split_loaded = True
-        else:
-            split_loaded = False
-            return sd, modelFileString
+        return sd, modelFileString
 
 
 # K-centroid downscaling alg
@@ -1644,116 +1456,6 @@ def rembg(images, modelpath):
     return output
 
 
-# Load T5 small
-def load_t5_pipeline(modelPath, device="cpu"):
-    tokenizer = T5Tokenizer.from_pretrained(modelPath)
-    model = T5ForConditionalGeneration.from_pretrained(modelPath, device_map=device)
-
-    return {"tokenizer": tokenizer, "model": model}
-
-
-# Removed sentence fragments
-def clean_t5_small_output(s):
-    # Find the last occurrence of a comma
-    last_comma_index = s.rfind(',')
-    # If a comma is found, slice the string up to the comma and add a period
-    if last_comma_index != -1:
-        s = s[5:last_comma_index] + '.'
-        return s.strip()
-    else:
-        s = s[5:]  # Return the original string if no comma is found
-        return s.strip()
-
-
-#Using T5-small
-# Generate prompts with LLM
-def generateLLMPrompts(prompts, negatives, seed, translate):
-    timer = time.time()
-    global modelLM
-    global loadedDevice
-    global modelType
-    global sounds
-    global modelPath
-
-    if translate:
-        # Check GPU VRAM to ensure LLM compatibility because users can't be trusted to select settings properly T-T
-        try:
-            with torch.no_grad():
-                # Load LLM for prompt upsampling
-                if modelLM == None:
-                    print("\nLoading prompt translation language model")
-                    modelLM = load_t5_pipeline(os.path.join(modelPath, "LLM"), loadedDevice)
-                    play("iteration.wav")
-                    rprint(f"[#c4f129]Loaded in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
-                
-                modelLM["model"].to(loadedDevice)
-                # Generate responses
-                rprint(f"\n[#48a971]Translation model [white]generating [#48a971]{len(prompts)} [white]enhanced prompts")
-
-                upsampled_captions = []
-                for prompt in clbar(prompts, name="Expanding", position="", unit="prompt", prefixwidth=12, suffixwidth=28):
-                    # Try to generate a response, if no response is identified after retrys, set upsampled prompt to initial prompt
-                    upsampled_caption = None
-                    set_seed(seed)
-
-                    input_text = f", {prompt}"
-                    outputs = modelLM["model"].generate(
-                        modelLM["tokenizer"](input_text, return_tensors="pt").input_ids.to(modelLM["model"].device), 
-                        max_new_tokens=77, 
-                        repetition_penalty=1.2, 
-                        temperature=0.75,
-                        top_p=0.8,
-                        top_k=85,
-                        do_sample=True, 
-                        use_cache=False
-                    )
-                    upsampled_caption = clean_t5_small_output(modelLM["tokenizer"].decode(outputs[0]))
-
-                    seed += 1
-
-                    upsampled_captions.append([upsampled_caption])
-                    play("iteration.wav")
-
-                prompts = upsampled_captions
-                del outputs, upsampled_caption
-                clearCache()
-
-                seed = seed - len(prompts)
-                print()
-                for i, prompt in enumerate(prompts[:8]):
-                    rprint(f"[#48a971]Seed: [#c4f129]{seed}[#48a971] Prompt: [#494b9b]{prompt[0]}")
-                    seed += 1
-                if len(prompts) > 8:
-                    rprint(f"[#48a971]Remaining prompts generated but not displayed.")
-                
-                cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
-                if cpuMemoryUnused <= 8:
-                    del modelLM
-                    clearCache()
-                    modelLM = None
-                elif loadedDevice == "cuda":
-                    mem = torch.cuda.memory_allocated() / 1e6
-                    modelLM["model"].to("cpu")
-                    # Wait until memory usage decreases
-                    while torch.cuda.memory_allocated() / 1e6 >= mem:
-                        time.sleep(1)
-        except Exception as e:
-            if "torch.cuda.OutOfMemoryError" in traceback.format_exc() or "Invalid buffer size" in traceback.format_exc():
-                rprint(f"\n[#494b9b]Translation model could not be loaded due to insufficient GPU resources.")
-            elif "GPU is required" in traceback.format_exc():
-                rprint(f"\n[#494b9b]Translation model requires a GPU to be loaded.")
-            else:
-                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                rprint(f"\n[#494b9b]Translation model could not be loaded.")
-    else:
-        if modelLM is not None:
-            del modelLM
-            clearCache()
-            modelLM = None
-    
-    return prompts, negatives
-
-
 # String only manupulation of prompt and negative
 def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
     # Load lora names
@@ -2247,35 +1949,6 @@ def fastRender(modelPV, samples_ddim, pixelSize, W, H):
     return x_sample_image
 
 
-# Palette generation wrapper for text to image
-def paletteGen(prompt, colors, seed, device, precision):
-    # Calculate the base for palette generation
-    base = 2**round(math.log2(colors))
-
-    # Calculate the width of the image based on the base and number of colors
-    width = 512+((512/base)*(colors-base))
-
-    # Generate text-to-image conversion with specified parameters
-    for _ in txt2img(prompt, "", False, False, False, int(width), 512, 1, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
-        image = _[1]
-
-    # Perform k-centroid downscaling on the image
-    image = decodeImage(image["value"]["images"][0])
-    image = kCentroid(image, int(image.width/(512/base)), 1, 2)
-
-    # Iterate over the pixels in the image and set corresponding palette colors
-    palette = Image.new('P', (colors, 1))
-    for x in range(image.width):
-        for y in range(image.height):
-            r, g, b = image.getpixel((x, y))
-
-            palette.putpixel((x, y), (r, g, b))
-
-    name = hash(str([prompt, colors, seed, device]))
-    rprint(f"[#c4f129]Image converted to color palette with [#48a971]{colors}[#c4f129] colors")
-    return [{"name": f"palette{name}", "format": "png", "image": encodeImage(palette.convert("RGB"), "png")}]
-
-
 # Wave pattern for HSV -> RGB lora conversion
 def continuous_pattern_wave(x):
     """
@@ -2352,324 +2025,6 @@ def manageComposition(lighting, composition, loras):
     return loras
 
 
-# Prepare variables for controlnet inference
-def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
-    raw_loras = []
-    
-    # Check gpu availability
-    if device == "cuda" and not torch.cuda.is_available():
-        if torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
-            rprint(f"\n[#ab333d]GPU is not responding, loading model in CPU mode")
-
-    if image is not None:
-        # Load initial image and move it to the specified device
-        image = image.resize((W, H), resample=Image.Resampling.BILINEAR)
-        init_image = load_img(image.convert("RGB"), H, W).to(device)
-
-    # Calculate maximum batch size
-    global maxSize
-    maxSize = maxBatchSize
-    size = math.sqrt(W * H)
-    if size >= maxSize or device == "cpu":
-        batch = 1
-    else:
-        batch = min(total_images, math.floor((maxSize / size) ** 2))
-    runs = (
-        math.floor(total_images / batch)
-        if total_images % batch == 0
-        else math.floor(total_images / batch) + 1
-    )
-
-    # Set the seed for random number generation if not provided
-    if seed == None:
-        seed = randint(0, 1000000)
-
-    global modelPath
-
-    # Composition and lighting modifications
-    loras = manageComposition(lighting, composition, loras)
-
-    lecoPath = os.path.join(modelPath, "LECO")
-    found_contrast = False
-    for lora in loras:
-        if lora["file"] == os.path.join(lecoPath, "brightness.leco"):
-            lora["weight"] = lora["weight"] - 20
-        if lora["file"] == os.path.join(lecoPath, "contrast.leco"):
-            found_contrast = True
-            lora["weight"] = lora["weight"] + 200
-    if not found_contrast:
-        loras.append({"file": os.path.join(lecoPath, "contrast.leco"), "weight": 200})
-
-    if math.sqrt((H // 8) * (W // 8)) < 24:
-        use_ella = False
-
-    # Resolution adapter
-    if math.sqrt((H // 8) * (W // 8)) < 60 and pixelSize == 8:
-        loras.append({"file": os.path.join(modelPath, "adapter.lcm"), "weight": 100})
-
-    # Apply modifications to raw prompts
-    prompts = [[prompt]] * total_images
-    negatives = [[negative]] * total_images
-    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, translate)
-    data = []
-    negative_data = []
-    for i, prompt_batch in enumerate(prompts):
-        temp_p, temp_n = managePrompts(prompt_batch, negatives[i], loras, promptTuning, use_ella)
-        data.append(temp_p)
-        negative_data.append(temp_n)
-    seed_everything(seed)
-
-    rprint(f"\n[#48a971]{title}[white] generating [#48a971]{total_images}[white] images with [#48a971]{steps}[white] steps over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
-
-    global model
-    global modelCS
-    global modelTA
-    global modelPV
-
-    # Set the precision scope based on device and precision
-    precision, model_precision, vae_precision = get_precision(device, precision)
-    precision_scope = autocast(device, precision, model_precision)
-
-    if image is not None:
-        init_image.to(vae_precision)
-
-    # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
-    decryptedFiles = []
-    fernet = Fernet("I47jl1hqUPug4KbVYd60_zeXhn_IH_ECT3QRGiBxdxo=")
-    for i, loraPair in enumerate(loras):
-        decryptedFiles.append("none")
-        _, loraName = os.path.split(loraPair["file"])
-        if loraName != "none":
-            # Handle proprietary models
-            if os.path.splitext(loraName)[1] == ".pxlm":
-                try:
-                    with open(loraPair["file"], "rb") as enc_file:
-                        encrypted = enc_file.read()
-                        try:
-                            # Assume file is encrypted, decrypt it
-                            decryptedFiles[i] = fernet.decrypt(encrypted)
-                        except:
-                            # Decryption failed, assume not encrypted
-                            decryptedFiles[i] = encrypted
-
-                        with open(loraPair["file"], "wb") as dec_file:
-                            # Write attempted decrypted file
-                            dec_file.write(decryptedFiles[i])
-                            try:
-                                raw_loras.append({"sd": load_lora_raw(loraPair["file"]), "weight": loraPair["weight"]})   
-                            except:
-                                # Decrypted file could not be read, revert to unchanged, and return an error
-                                decryptedFiles[i] = "none"
-                                dec_file.write(encrypted)
-                                rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
-                                continue
-                except:
-                    rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
-            else:
-                # Add lora to unet
-                raw_loras.append({"sd": load_lora_raw(loraPair["file"]), "weight": loraPair["weight"]}) 
-                
-            if not any(name == os.path.splitext(loraName)[0] for name in system_models):
-                rprint(f"[#494b9b]Using [#48a971]{os.path.splitext(loraName)[0]} [#494b9b]LoRA with [#48a971]{loraPair['weight']}% [#494b9b]strength")
-
-    seeds = []
-    encoded_latent = []
-    with torch.no_grad():
-        with precision_scope:
-            if image is not None:
-                latentBatch = batch
-                latentCount = 0
-
-                # Move the initial image to latent space and resize it
-                init_latent_base = modelTA.encoder(init_image)
-                init_latent_base = torch.nn.functional.interpolate(init_latent_base, size=(H // 8, W // 8), mode="bilinear") * 6.0
-                if init_latent_base.shape[0] < latentBatch:
-                    # Create tiles of inputs to match batch arrangement
-                    init_latent_base = init_latent_base.repeat([math.ceil(latentBatch / init_latent_base.shape[0])] + [1] * (len(init_latent_base.shape) - 1))[:latentBatch]
-
-                for run in range(runs):
-                    if total_images - latentCount < latentBatch:
-                        latentBatch = total_images - latentCount
-
-                        # Slice latents to new batch size
-                        init_latent_base = init_latent_base[:latentBatch]
-
-                    # Encode the scaled latent
-                    encoded_latent.append(init_latent_base)
-                    latentCount += latentBatch
-            else:
-                for run in range(runs):
-                    encoded_latent.append(None)
-
-        with autocast(device, precision, torch.float32):
-            # Concepts containing attributes and weights (can contain negative attributes or not).
-            #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
-            attributes = {"sliders": []}
-
-            if device == "cuda" and torch.cuda.is_available():
-                cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-            else:
-                cardMemory = psutil.virtual_memory().available / (1024 ** 3)
-            if use_ella and cardMemory >= 4:
-                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision)
-                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
-            else:
-                if use_ella:
-                    rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 4GB of VRAM or unused RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
-                conditioning, negative_conditioning, shape = get_text_embed_clip(data, negative_data, runs, batch, total_images, W // 8, H // 8, device, attributes)
-
-            return conditioning, negative_conditioning, encoded_latent, steps, scale, runs, data, negative_data, seeds, batch, raw_loras
-
-
-# Run controlnet inference
-def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
-    timer = time.time()
-    global modelCS
-    global modelFS
-    global modelTA
-    global modelPV
-
-    # Check gpu availability
-    if device == "cuda" and not torch.cuda.is_available():
-        if torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
-            rprint(f"\n[#ab333d]GPU is not responding, loading model in CPU mode")
-
-    if autocaption and init_img is not None:
-        global modelBLIP
-        if modelBLIP is None:
-            global modelPath
-            modelBLIP = load_blip(os.path.join(modelPath, "BLIP"))
-
-        if modelBLIP is not None:
-            processor = modelBLIP["processor"]
-            model = modelBLIP["model"]
-
-            blip_image = resize_image(init_img, 512)
-            if prompt is not None:
-                inputs = processor(blip_image, prompt, return_tensors="pt")
-            else:
-                inputs = processor(blip_image, return_tensors="pt")
-
-            rprint(f"\n[#48a971]Vision model [/]generating image description")
-            prompt = remove_repeated_words(processor.decode(model.generate(**inputs, max_new_tokens=30)[0], skip_special_tokens=True))
-            rprint(f"[#48a971]Caption: [#494b9b]{prompt}")
-    
-    conditioning, negative_conditioning, image_embed, steps, scale, runs, data, negative_data, seeds, batch, raw_loras = prepare_inference(title, prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, init_img)
-
-    title = title.lower().replace(' ', '_')
-
-    rprint(f"[#48a971]Patching model for controlnet")
-    model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
-
-    precision, model_precision, vae_precision = get_precision(device, precision)
-
-    with torch.no_grad():
-        base_count = 0
-        output = []
-
-        # Iterate over the specified number of iterations
-        for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
-            batch = min(batch, total_images - base_count)
-
-            for step, samples_ddim in enumerate(sample_cldm(
-                model_patcher,
-                cldm_cond,
-                cldm_uncond,
-                seed,
-                steps, # steps,
-                scale + 2.0, # cfg,
-                "ddim", # sampler,
-                batch, # batch size
-                W,
-                H,
-                image_embed[run], # initial latent for img2img
-                strength, # denoise strength
-                "kl_optimal" # scheduler
-            )):
-                if preview:
-                    message = [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
-                    # Render and send image previews
-                    if step % math.ceil(math.sqrt(W * H) / 448) == 0:
-                        displayOut = []
-                        for i in range(batch):
-                            x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
-                            name = str(seed+i)
-                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                        message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
-                    yield message
-            
-            for i in range(batch):
-                x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
-                if total_images > 1 and (base_count + 1) < total_images:
-                    play("iteration.wav")
-
-                seeds.append(str(seed))
-                name = [data[i], negative_data[i], translate, promptTuning, W, H, steps, scale, device, loras, pixelvae, seed]
-                if init_img is not None:
-                    name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
-                name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
-                output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
-
-                seed += 1
-                base_count += 1
-            # Delete the samples to free up memory
-            del samples_ddim
-
-        if mapColors and init_img is not None:
-            # Get cv2 format image for color matching
-            org_img = np.array(init_img.resize((W // 8, H // 8), resample=Image.Resampling.BICUBIC))
-            org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
-
-            # Get palette for indexing
-            numColors = 256
-            palette_img = init_img.resize((W // 8, H // 8), resample=Image.Resampling.NEAREST)
-            palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-            numColors = len(palette_img.getcolors(numColors))
-
-            # Extract palette colors
-            palette = np.concatenate([x[1] for x in palette_img.getcolors(numColors)]).tolist()
-
-            # Create a new palette image
-            tempPaletteImage = Image.new("P", (256, 1))
-            tempPaletteImage.putpalette(palette)
-
-            # Convert generated image to reduced input image palette
-            temp_output = output
-            output = []
-            for image in temp_output:
-                tempImage = image["image"]
-
-                # Match colors loosely
-                cv2_temp = cv2.cvtColor(np.array(tempImage), cv2.COLOR_RGB2BGR)
-                color_matched_img = match_color(cv2_temp, org_img)
-                image_indexed = Image.fromarray(cv2.cvtColor(color_matched_img, cv2.COLOR_BGR2RGB)).convert("RGB")
-                
-                # Index image to actual colors
-                image_indexed = image_indexed.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
-
-                if post:
-                    numColors = determine_best_k(image_indexed, 96)
-                    image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-
-                output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
-        elif post:
-            output = palettizeOutput(output)
-
-        final = []
-        for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
-        play("batch.wav")
-        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
-        unload_cldm()
-        yield ["", {"action": "display_image", "type": title, "value": {"images": final, "prompts": data, "negatives": negative_data}}]
-
-
 # Generate image from text prompt
 def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
@@ -2724,7 +2079,6 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
     negatives = [[negative]] * total_images
-    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, translate)
     data = []
     negative_data = []
     for i, prompt_batch in enumerate(prompts):
@@ -2750,7 +2104,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
     loadedLoras = []
     decryptedFiles = []
-    fernet = Fernet("I47jl1hqUPug4KbVYd60_zeXhn_IH_ECT3QRGiBxdxo=")
+    fernet = Fernet("4XzwK4t0ykpXAabbB2IIa71M5B9dUzzs-XC7Njhxn4U=")
     for i, loraPair in enumerate(loras):
         decryptedFiles.append("none")
         _, loraName = os.path.split(loraPair["file"])
@@ -2952,7 +2306,6 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Apply modifications to raw prompts
     prompts = [[prompt]] * total_images
     negatives = [[negative]] * total_images
-    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, translate)
     data = []
     negative_data = []
     for i, prompt_batch in enumerate(prompts):
@@ -2978,7 +2331,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
     loadedLoras = []
     decryptedFiles = []
-    fernet = Fernet("I47jl1hqUPug4KbVYd60_zeXhn_IH_ECT3QRGiBxdxo=")
+    fernet = Fernet("4XzwK4t0ykpXAabbB2IIa71M5B9dUzzs-XC7Njhxn4U=")
     for i, loraPair in enumerate(loras):
         decryptedFiles.append("none")
         _, loraName = os.path.split(loraPair["file"])
@@ -3151,171 +2504,6 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
         yield ["", {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
 
 
-# Wrapper for prompt manager
-def prompt2prompt(path, prompt, negative, generations, seed):
-    timer = time.time()
-    global modelLM
-    global sounds
-    global modelPath
-    global loadedDevice
-
-    # Check gpu availability
-    if torch.cuda.is_available():
-        loadedDevice = "cuda"
-    elif torch.backends.mps.is_available():
-        loadedDevice = "mps"
-    else:
-        loadedDevice = "cpu"
-        rprint(f"\n[#ab333d]GPU is not responding, loading model in CPU mode")
-            
-    modelPath = path
-
-    prompts = [[prompt]] * generations
-    negatives = [[negative]] * generations
-
-    prompts, negatives = generateLLMPrompts(prompts, negatives, seed, True)
-
-    prompts = sum(prompts, [])
-
-    play("batch.wav")
-    rprint(f"[#c4f129]Prompt enhancement completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
-
-    return prompts
-
-
-# Test largest image generation possible
-def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, seed):
-    timer = time.time()
-
-    if device == "cuda" and not torch.cuda.is_available():
-        if torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
-            rprint(f"\n[#ab333d]GPU is not responding, loading model in CPU mode")
-
-    global maxSize
-
-    testSize = maxTestSize
-    resize = testSize
-
-    steps = 1
-
-    tested = []
-
-    tests = round(math.log2(maxTestSize) - math.log2(errorRange)) + 1
-
-    # Set the seed for random number generation if not provided
-    if seed == None:
-        seed = randint(0, 1000000)
-    seed_everything(seed)
-
-    rprint(f"\n[#48a971]Running benchmark[white] with a maximum generation size of [#48a971]{maxTestSize*8}[white]x[#48a971]{maxTestSize*8}[white] ([#48a971]{maxTestSize}[white]x[#48a971]{maxTestSize}[white] pixels) for [#48a971]{tests}[white] total tests")
-
-    start_code = None
-    sampler = "pxlcm"
-
-    global model
-    global modelCS
-    global modelFS
-    global modelTA
-    global modelPV
-
-    # Set the precision scope based on device and precision
-    precision, model_precision, vae_precision = get_precision(device, precision)
-    precision_scope = autocast(device, precision, model_precision)
-
-    data = [""]
-    negative_data = [""]
-    with torch.no_grad():
-        base_count = 0
-        lower = 0
-
-        # Load text encoder
-        modelCS.to(device)
-        uc = None
-        uc = modelCS.get_learned_conditioning(negative_data)
-
-        c = modelCS.get_learned_conditioning(data)
-
-        # Move modelCS to CPU if necessary to free up GPU memory
-        if device == "cuda":
-            mem = torch.cuda.memory_allocated() / 1e6
-            modelCS.to("cpu")
-            # Wait until memory usage decreases
-            while torch.cuda.memory_allocated() / 1e6 >= mem:
-                time.sleep(1)
-
-        # Iterate over the specified number of iterations
-        for n in clbar(range(tests), name="Tests", position="last", unit="test", prefixwidth=12, suffixwidth=28,):
-            benchTimer = time.time()
-            timerPerStep = 1
-            passedTest = False
-            # Use the specified precision scope
-            with precision_scope:
-                try:
-                    shape = [1, 4, testSize, testSize]
-
-                    # Generate samples using the model
-                    for step, samples_ddim in enumerate(
-                        model.sample(
-                            S=steps,
-                            conditioning=c,
-                            seed=seed,
-                            shape=shape,
-                            verbose=False,
-                            unconditional_guidance_scale=5.0,
-                            unconditional_conditioning=uc,
-                            eta=0.0,
-                            x_T=start_code,
-                            sampler=sampler,
-                        )
-                    ):
-                        pass
-
-                    render(modelFS, modelTA, modelPV, samples_ddim, 0, device, precision, testSize, testSize, 8, pixelvae, False, False, ["None"], False)
-
-                    # Delete the samples to free up memory
-                    del samples_ddim
-
-                    timerPerStep = round(time.time() - benchTimer, 2)
-
-                    passedTest = True
-                except:
-                    passedTest = False
-
-                if tests > 1 and (base_count + 1) < tests:
-                    play("iteration.wav")
-
-                base_count += 1
-
-                torch.cuda.empty_cache()
-                if torch.backends.mps.is_available() and device != "cpu":
-                    torch.mps.empty_cache()
-
-                if passedTest and timerPerStep <= timeLimit:
-                    maxSize = testSize
-                    tested.append((testSize, "[#c4f129]Passed"))
-                    if n == 0:
-                        rprint(f"\n[#c4f129]Maximum test size passed")
-                        break
-                    lower = testSize
-                    testSize = round(lower + (resize / 2))
-                    resize = testSize - lower
-                else:
-                    tested.append((testSize, "[#ab333d]Failed"))
-                    testSize = round(lower + (resize / 2))
-                    resize = testSize - lower
-        sortedTests = sorted(tested, key=lambda x: (-x[0], x[1]))
-        printTests = f"[#48a971]{sortedTests[0][0]}[white]: {sortedTests[0][1]}[white]"
-        for test in sortedTests[1:]:
-            printTests = f"{printTests}, [#48a971]{test[0]}[white]: {test[1]}[white]"
-            if test[1] == "Passed":
-                break
-        play("batch.wav")
-        rprint(f"[#c4f129]Benchmark completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n{printTests}\n[white]The maximum size possible on your hardware with less than [#48a971]{timeLimit}[white] seconds per step is [#48a971]{maxSize*8}[white]x[#48a971]{maxSize*8}[white] ([#48a971]{maxSize}[white]x[#48a971]{maxSize}[white] pixels)")
-
-
 async def server(websocket):
     background = False
     try:
@@ -3326,367 +2514,6 @@ async def server(websocket):
             try:
                 message = json.loads(message)
                 match message["action"]:
-                    case "transform":
-                        try:
-                            title = "Neural Transform"
-
-                            # Extract parameters from the message
-                            values = message["value"]
-                            modelData = values["model"]
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Loading model"}}))
-                            
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                                False
-                            )
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generating..."}}))
-                            
-                            # Neural detail workflow
-                            
-                            # Decode input image
-                            init_img = decodeImage(values["images"][0])
-
-                            # Resize image to output dimensions
-                            image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.NEAREST).convert("RGB")
-
-                            # Blur filter for detail
-                            image_blur = image.filter(ImageFilter.BoxBlur(4))
-
-                            # Net models, images, and weights in order
-                            modelPath, _ = os.path.split(modelData["file"])
-                            netPath = os.path.join(modelPath, "CONTROLNET")
-                            lecoPath = os.path.join(modelPath, "LECO")
-                            loras = values["loras"]
-                            loras.append({"file": os.path.join(lecoPath, "detail.leco"), "weight": -50})
-                            controlnets = [{"model_file": os.path.join(netPath, "Composition.safetensors"), "image": image, "weight": 1.0}]
-
-                            for result in neural_inference(
-                                modelData["file"],
-                                title,
-                                controlnets,
-                                values["prompt"],
-                                values["negative"],
-                                values["use_ella"],
-                                False,
-                                values["translate"],
-                                values["prompt_tuning"],
-                                values["width"],
-                                values["height"],
-                                values["pixel_size"],
-                                values["steps"],
-                                values["scale"],
-                                1.0,
-                                values["lighting"],
-                                values["composition"],
-                                values["seed"],
-                                values["generations"],
-                                values["max_batch_size"],
-                                modelData["device"],
-                                modelData["precision"],
-                                values["loras"],
-                                values["send_progress"],
-                                values["use_pixelvae"],
-                                False,
-                                values["post_process"],
-                                init_img
-                            ):
-                                if values["send_progress"]:
-                                    await websocket.send(json.dumps(result[0]))
-                                    if len(result) >= 2:
-                                        await websocket.send(json.dumps(result[1]))
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
-                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
-                        except Exception as e:
-                            if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            else:
-                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "detail":
-                        try:
-                            title = "Neural Detail"
-
-                            # Extract parameters from the message
-                            values = message["value"]
-                            modelData = values["model"]
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title","type": title.lower().replace(' ', '_'),"value": {"text": "Loading model"}}))
-                            
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                                False
-                            )
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title","type": title.lower().replace(' ', '_'),"value": {"text": "Generating..."}}))
-                            
-                            # Neural detail workflow
-                            
-                            # Decode input image
-                            init_img = decodeImage(values["images"][0])
-
-                            # Resize image to output dimensions
-                            image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.NEAREST)
-
-                            # Blur filter for detail
-                            image_blur = image.filter(ImageFilter.BoxBlur(2))
-
-                            # i2i strength
-                            strength = 0.5 + (values["detail"] * 0.05)
-
-                            # Net models, images, and weights in order
-                            modelPath, _ = os.path.split(modelData["file"])
-                            netPath = os.path.join(modelPath, "CONTROLNET")
-                            lecoPath = os.path.join(modelPath, "LECO")
-                            loras = values["loras"]
-                            loras.append({"file": os.path.join(lecoPath, "detail.leco"), "weight": values["detail"] * -10})
-                            controlnets = [{"model_file": os.path.join(netPath, "Tile.safetensors"), "image": image_blur, "weight": 0.5}, {"model_file": os.path.join(netPath, "Composition.safetensors"), "image": image, "weight": 0.5}]
-                            
-                            for result in neural_inference(
-                                modelData["file"],
-                                title,
-                                controlnets,
-                                values["prompt"],
-                                values["negative"],
-                                values["use_ella"],
-                                values["blip"],
-                                False,
-                                values["prompt_tuning"],
-                                values["width"],
-                                values["height"],
-                                values["pixel_size"],
-                                values["steps"],
-                                values["scale"],
-                                strength,
-                                values["lighting"],
-                                values["composition"],
-                                values["seed"],
-                                values["generations"],
-                                values["max_batch_size"],
-                                modelData["device"],
-                                modelData["precision"],
-                                loras,
-                                values["send_progress"],
-                                values["use_pixelvae"],
-                                values["color_map"],
-                                values["post_process"],
-                                init_img # Pass original, unscaled image
-                            ):
-                                if values["send_progress"]:
-                                    await websocket.send(json.dumps(result[0]))
-                                    if len(result) >= 2:
-                                        await websocket.send(json.dumps(result[1]))
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
-                            await websocket.send(json.dumps({"action": "returning","type": "img2img","value": {"images": result[1]["value"]["images"]}}))
-                        except Exception as e:
-                            if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            else:
-                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "resize":
-                        try:
-                            title = "Neural Resize"
-
-                            # Extract parameters from the message
-                            values = message["value"]
-                            modelData = values["model"]
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Loading model"}}))
-                            
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                                False
-                            )
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generating..."}}))
-                            
-                            # Neural resize workflow
-                            
-                            # Decode input image
-                            init_img = decodeImage(values["images"][0])
-
-                            # Resize image to output dimensions
-                            image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.BOX)
-
-                            # i2i strength
-                            strength = 0.9
-
-                            # Net models, images, and weights in order
-                            modelPath, _ = os.path.split(modelData["file"])
-                            netPath = os.path.join(modelPath, "CONTROLNET")
-                            lecoPath = os.path.join(modelPath, "LECO")
-                            loras = values["loras"]
-                            loras.append({"file": os.path.join(lecoPath, "detail.leco"), "weight": -40})
-                            controlnets = [{"model_file": os.path.join(netPath, "Tile.safetensors"), "image": image, "weight": 0.8}, {"model_file": os.path.join(netPath, "Composition.safetensors"), "image": image, "weight": 0.4}]
-
-                            for result in neural_inference(
-                                modelData["file"],
-                                title,
-                                controlnets,
-                                values["prompt"],
-                                values["negative"],
-                                values["use_ella"],
-                                values["blip"],
-                                False,
-                                values["prompt_tuning"],
-                                values["width"],
-                                values["height"],
-                                values["pixel_size"],
-                                values["steps"],
-                                values["scale"],
-                                strength,
-                                values["lighting"],
-                                values["composition"],
-                                values["seed"],
-                                values["generations"],
-                                values["max_batch_size"],
-                                modelData["device"],
-                                modelData["precision"],
-                                values["loras"],
-                                values["send_progress"],
-                                values["use_pixelvae"],
-                                values["color_map"],
-                                values["post_process"],
-                                init_img # Pass original, unscaled image
-                            ):
-                                if values["send_progress"]:
-                                    await websocket.send(json.dumps(result[0]))
-                                    if len(result) >= 2:
-                                        await websocket.send(json.dumps(result[1]))
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
-                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
-                        except Exception as e:
-                            if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            else:
-                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "pixelate":
-                        try:
-                            title = "Neural Pixelate"
-
-                            # Extract parameters from the message
-                            values = message["value"]
-                            modelData = values["model"]
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Loading model"}}))
-                            
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                                False
-                            )
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generating..."}}))
-
-                            # Decode input image
-                            init_img = decodeImage(values["images"][0])
-
-                            # Resize image to output dimensions
-                            image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.BOX)
-
-                            # Blur filter for pixelate
-                            image_blur = image.filter(ImageFilter.BoxBlur(2))
-
-                            # i2i strength
-                            strength = 0.85
-
-                            # Net models, images, and weights in order
-                            modelPath, _ = os.path.split(modelData["file"])
-                            netPath = os.path.join(modelPath, "CONTROLNET")
-                            controlnets = [{"model_file": os.path.join(netPath, "Tile.safetensors"), "image": image_blur, "weight": 1.0}, {"model_file": os.path.join(netPath, "Composition.safetensors"), "image": image_blur, "weight": 0.5}]
-
-                            for result in neural_inference(
-                                modelData["file"],
-                                title,
-                                controlnets,
-                                values["prompt"],
-                                values["negative"],
-                                values["use_ella"],
-                                values["blip"],
-                                False,
-                                values["prompt_tuning"],
-                                values["width"],
-                                values["height"],
-                                values["pixel_size"],
-                                values["steps"],
-                                values["scale"],
-                                strength,
-                                values["lighting"],
-                                values["composition"],
-                                values["seed"],
-                                values["generations"],
-                                values["max_batch_size"],
-                                modelData["device"],
-                                modelData["precision"],
-                                values["loras"],
-                                values["send_progress"],
-                                values["use_pixelvae"],
-                                values["color_map"],
-                                values["post_process"],
-                                init_img # Pass original, unscaled image
-                            ):
-                                if values["send_progress"]:
-                                    await websocket.send(json.dumps(result[0]))
-                                    if len(result) >= 2:
-                                        await websocket.send(json.dumps(result[1]))
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
-                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
-                        except Exception as e:
-                            if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            else:
-                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
                     case "txt2img":
                         try:
                             # Extract parameters from the message
@@ -3743,121 +2570,6 @@ async def server(websocket):
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
                             elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            else:
-                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "cntxt2img":
-                        try:
-                            title = "ControlNet Text to Image"
-
-                            # Extract parameters from the message
-                            values = message["value"]
-                            modelData = values["model"]
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Loading model"}}))
-                            
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                                False
-                            )
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generating..."}}))
-                            
-                            # Load controlnets and images
-                            controlnets = []
-                            modelPath, _ = os.path.split(modelData["file"])
-                            for i, controlnet in enumerate(values["controlnets"]):
-                                if controlnet["enabled"] == True:
-                                    if values["images"][i] == "none":
-                                        rprint(f"[#ab333d]Attempted to load {controlnet['model']} ControlNet, but no image was found. Disable ControlNets with no input to avoid this warning.")
-                                    else:
-                                        # Decode input image
-                                        init_img = decodeImage(values["images"][i])
-                                        if init_img.width <= 1 or init_img.height <= 1:
-                                            rprint(f"[#ab333d]Attempted to load {controlnet['model']} ControlNet, but no image was found. Disable ControlNets with no input to avoid this warning.")
-                                        else:
-                                            # Resize image to output dimensions
-                                            image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.BILINEAR).convert("RGB")
-
-                                            if controlnet["model"] == "Sketch":
-                                                if controlnet["process"]:
-                                                    image = extract_high_frequencies(image)
-                                                else:
-                                                    image = np.array(ImageOps.invert(image.convert("L").convert("RGB")))
-                                                    filtered = np.where(image >= 128, 255, 0)
-                                                    image = Image.fromarray(filtered.astype(np.uint8))
-
-                                            elif controlnet["process"]:
-                                                if controlnet["model"] == "Depth":
-                                                    depthPath = os.path.join(modelPath, "PREPROCESSOR", "DEPTH")
-                                                    image = depth_estimation(image, depthPath)
-                                                    if np.all(np.array(image) == 0):
-                                                        rprint(f"[#ab333d]No depth map could be extracted from input image.")
-                                                elif controlnet["model"] == "Pose":
-                                                    prePath = os.path.join(modelPath, "PREPROCESSOR")
-                                                    image, _ = pose_estimation(image, os.path.join(prePath, "POSE_OpenPose.pth"))
-                                                    if np.all(np.array(image) == 0):
-                                                        rprint(f"[#ab333d]No pose detected in input image.")
-                                                elif controlnet["model"] == "Tile":
-                                                    image = image.filter(ImageFilter.GaussianBlur(radius=2))
-
-                                            rprint(f"[#494b9b]Loading [#48a971]{controlnet['model']} [#494b9b]ControlNet with [#48a971]{controlnet['weight']}% [#494b9b]strength")
-
-                                            netPath = os.path.join(modelPath, "CONTROLNET")
-                                            controlnets.append({"model_file": os.path.join(netPath, f"{controlnet['model']}.safetensors"), "image": image, "weight": controlnet["weight"]/100})
-                                        
-                            for result in neural_inference(
-                                modelData["file"],
-                                title,
-                                controlnets,
-                                values["prompt"],
-                                values["negative"],
-                                values["use_ella"],
-                                False,
-                                values["translate"],
-                                values["prompt_tuning"],
-                                values["width"],
-                                values["height"],
-                                values["pixel_size"],
-                                values["steps"],
-                                values["scale"],
-                                1.0,
-                                values["lighting"],
-                                values["composition"],
-                                values["seed"],
-                                values["generations"],
-                                values["max_batch_size"],
-                                modelData["device"],
-                                modelData["precision"],
-                                values["loras"],
-                                values["send_progress"],
-                                values["use_pixelvae"],
-                                False,
-                                values["post_process"]
-                            ):
-                                if values["send_progress"]:
-                                    await websocket.send(json.dumps(result[0]))
-                                    if len(result) >= 2:
-                                        await websocket.send(json.dumps(result[1]))
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
-                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
-                        except Exception as e:
-                            if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
                             else:
                                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
@@ -3921,204 +2633,12 @@ async def server(websocket):
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
                             elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size. If samples are at 100%, this was caused by the VAE running out of memory, try enabling the Fast Pixel Decoder")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
                             #elif ("Expected batch_size > 0 to be true" in traceback.format_exc()):
                             #    rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
                             #elif ("cannot reshape tensor of 0 elements" in traceback.format_exc()):
                             #    rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
                             else:
                                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "cnimg2img":
-                        try:
-                            title = "ControlNet Image to Image"
-
-                            # Extract parameters from the message
-                            values = message["value"]
-                            modelData = values["model"]
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Loading model"}}))
-                            
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                                False
-                            )
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generating..."}}))
-                            
-                            # Load controlnets and images
-                            controlnets = []
-                            modelPath, _ = os.path.split(modelData["file"])
-                            for i, controlnet in enumerate(values["controlnets"]):
-                                if controlnet["enabled"] == True:
-                                    # Decode input image
-                                    init_img = decodeImage(values["images"][i])
-                                    if init_img.width <= 1 or init_img.height <= 1:
-                                        rprint(f"[#ab333d]Attempted to load {controlnet['model']} ControlNet, but no image was found. Disable ControlNets with no input to avoid this warning.")
-                                    else:
-                                        # Resize image to output dimensions
-                                        image = init_img.resize((values["width"], values["height"]), resample=Image.Resampling.BILINEAR).convert("RGB")
-
-                                        if controlnet["model"] == "Sketch":
-                                            if controlnet["process"]:
-                                                image = extract_high_frequencies(image)
-                                            else:
-                                                image = np.array(ImageOps.invert(image.convert("L").convert("RGB")))
-                                                filtered = np.where(image >= 128, 255, 0)
-                                                image = Image.fromarray(filtered.astype(np.uint8))
-
-                                        elif controlnet["process"]:
-                                            if controlnet["model"] == "Depth":
-                                                depthPath = os.path.join(modelPath, "PREPROCESSOR", "DEPTH")
-                                                image = depth_estimation(image, depthPath)
-                                            elif controlnet["model"] == "Pose":
-                                                prePath = os.path.join(modelPath, "PREPROCESSOR")
-                                                image, _ = pose_estimation(image, os.path.join(prePath, "POSE_OpenPose.pth"))
-                                                if np.all(np.array(image) == 0):
-                                                    rprint(f"[#ab333d]No pose detected in input image.")
-                                            elif controlnet["model"] == "Tile":
-                                                image = image.filter(ImageFilter.GaussianBlur(radius=2))
-
-                                        rprint(f"[#494b9b]Loading [#48a971]{controlnet['model']} [#494b9b]ControlNet with [#48a971]{controlnet['weight']}% [#494b9b]strength")
-
-                                        modelPath, _ = os.path.split(modelData["file"])
-                                        netPath = os.path.join(modelPath, "CONTROLNET")
-                                        controlnets.append({"model_file": os.path.join(netPath, f"{controlnet['model']}.safetensors"), "image": image, "weight": controlnet["weight"]/100})
-
-                            for result in neural_inference(
-                                modelData["file"],
-                                title,
-                                controlnets,
-                                values["prompt"],
-                                values["negative"],
-                                values["use_ella"],
-                                False,
-                                values["translate"],
-                                values["prompt_tuning"],
-                                values["width"],
-                                values["height"],
-                                values["pixel_size"],
-                                values["steps"],
-                                values["scale"],
-                                values["strength"]/100,
-                                values["lighting"],
-                                values["composition"],
-                                values["seed"],
-                                values["generations"],
-                                values["max_batch_size"],
-                                modelData["device"],
-                                modelData["precision"],
-                                values["loras"],
-                                values["send_progress"],
-                                values["use_pixelvae"],
-                                False,
-                                values["post_process"],
-                                decodeImage(values["images"][len(values["images"])-1])
-                            ):
-                                if values["send_progress"]:
-                                    await websocket.send(json.dumps(result[0]))
-                                    if len(result) >= 2:
-                                        await websocket.send(json.dumps(result[1]))
-
-                            if values["send_progress"]:
-                                await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
-                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
-                        except Exception as e:
-                            if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            else:
-                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "txt2pal":
-                        try:
-                            # Extract parameters from the message
-                            values = message["value"]
-
-                            modelData = values["model"]
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                            )
-
-                            images = paletteGen(
-                                values["prompt"],
-                                values["colors"],
-                                values["seed"],
-                                modelData["device"],
-                                modelData["precision"],
-                            )
-
-                            await websocket.send(json.dumps({"action": "returning", "type": "txt2pal", "value": {"images": images}}))
-                        except Exception as e:
-                            if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
-                                rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
-                                if modelLM is not None:
-                                    rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
-                            else:
-                                rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "translate":
-                        try:
-                            # Extract parameters from the message
-                            values = message["value"]
-
-                            prompts = prompt2prompt(
-                                values["model_folder"],
-                                values["prompt"],
-                                values["negative"],
-                                values["generations"],
-                                values["seed"],
-                            )
-                            await websocket.send(json.dumps({"action": "returning", "type": "translate", "value": prompts}))
-                        except Exception as e:
-                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
-                            play("error.wav")
-                            await websocket.send(json.dumps({"action": "error"}))
-                    case "benchmark":
-                        try:
-                            # Extract parameters from the message
-                            values = message["value"]
-
-                            modelData = values["model"]
-                            load_model(
-                                modelData["file"],
-                                "scripts/v1-inference.yaml",
-                                modelData["device"],
-                                modelData["precision"],
-                                modelData["optimized"],
-                            )
-
-                            prompts = benchmark(
-                                modelData["device"],
-                                modelData["precision"],
-                                values["time_limit"],
-                                values["max_test_size"],
-                                values["error_range"],
-                                values["use_pixelvae"],
-                                values["seed"],
-                            )
-
-                            await websocket.send(json.dumps({"action": "returning", "type": "benchmark", "value": max(32, maxSize - 8)}))  # We subtract 8 to leave a little VRAM headroom, so it doesn't OOM if you open a youtube tab T-T
-                        except Exception as e:
-                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
                             await websocket.send(json.dumps({"action": "error"}))
                     case "palettize":
