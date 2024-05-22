@@ -2595,7 +2595,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                 if preview:
                     message = [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
                     # Render and send image previews
-                    if step % max(1, round((math.sqrt(W * H) / 448))) == 0:
+                    if step % math.ceil(math.sqrt(W * H) / 448) == 0:
                         displayOut = []
                         for i in range(batch):
                             x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
@@ -2845,7 +2845,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                     if preview:
                         message = [{"action": "display_title", "type": "txt2img", "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
                         # Render and send image previews
-                        if step % max(1, round((math.sqrt(W * H) / 448))) == 0:
+                        if step % math.ceil(math.sqrt(W * H) / 448) == 0:
                             displayOut = []
                             for i in range(batch):
                                 x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
@@ -3103,7 +3103,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                     if preview:
                         message = [{"action": "display_title", "type": "img2img", "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
                         # Render and send image previews
-                        if step % max(1, round((math.sqrt(W * H) / 448))) == 0:
+                        if step % math.ceil(math.sqrt(W * H) / 448) == 0:
                             displayOut = []
                             for i in range(batch):
                                 x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
