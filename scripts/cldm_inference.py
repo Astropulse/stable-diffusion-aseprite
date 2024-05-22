@@ -92,7 +92,7 @@ def load_controlnet(
     lora_model_patcher.patch_model()
 
 
-    size = round(math.sqrt(width * height))
+    size = round(math.sqrt(width * height) // 8)
 
     use_hidiff = size >= 80
 
