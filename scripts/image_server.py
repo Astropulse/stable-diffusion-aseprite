@@ -2623,12 +2623,12 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
 
         if mapColors and init_img is not None:
             # Get cv2 format image for color matching
-            org_img = np.array(init_img.resize((W // 8, H // 8), resample=Image.Resampling.BICUBIC))
+            org_img = np.array(init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.BICUBIC))
             org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
 
             # Get palette for indexing
             numColors = 256
-            palette_img = init_img.resize((W // 8, H // 8), resample=Image.Resampling.NEAREST)
+            palette_img = init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.NEAREST)
             palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
             numColors = len(palette_img.getcolors(numColors))
 
