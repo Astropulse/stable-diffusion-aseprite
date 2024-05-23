@@ -854,16 +854,6 @@ class BasicTransformerBlock(nn.Module):
         _, _, h, w = original_shape
         _, qn, _ = q.shape
 
-        size = round(math.sqrt(w * h))
-
-        transformer_options["use_mswmsa"] = size > 144 # enable for > 144x144
-        # mswmsa attention
-        attn_use_blocks = parse_blocks("input", "1, 2")
-        attn_use_blocks |= parse_blocks("middle", "")
-        attn_use_blocks |= parse_blocks("output", "11,10,9")
-        transformer_options["attn_use_blocks"] = attn_use_blocks
-        transformer_options["attn_range"] = (0.2, 1.0)
-
         # MSWMSA Attention
         use_blocks = transformer_options.get("attn_use_blocks")
         block = transformer_options.get("block")

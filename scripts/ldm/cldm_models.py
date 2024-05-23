@@ -4012,6 +4012,21 @@ class BasicTransformerBlock(nn.Module):
     def _forward(self, x, context=None, transformer_options={}):
         x = x.contiguous() if x.device.type == "mps" else x
 
+        extra_options = {}
+        block = transformer_options.get("block", None)
+        block_index = transformer_options.get("block_index", 0)
+        transformer_patches = {}
+        transformer_patches_replace = {}
+
+        for k in transformer_options:
+            if k == "patches":
+                transformer_patches = transformer_options[k]
+            elif k == "patches_replace":
+                transformer_patches_replace = transformer_options[k]
+            else:
+                extra_options[k] = transformer_options[k]
+
+
         n = self.norm1(x)
         q = n
         k = q
@@ -4021,7 +4036,17 @@ class BasicTransformerBlock(nn.Module):
         _, _, h, w = original_shape
         _, qn, _ = q.shape
 
-        hyperTile = True
+
+        hyperTile = False
+        if "attn1_patch" in transformer_patches:
+            patch = transformer_patches["attn1_patch"]
+            if k is None:
+                k = q
+            v = k
+            for p in patch:
+                q, k, v = p(n, k, v, extra_options)
+        else:
+            hyperTile = True
 
         if hyperTile:
             nw = max_tile(w)
@@ -4039,6 +4064,11 @@ class BasicTransformerBlock(nn.Module):
         k, v = m(k), m(v)
 
         n = self.attn1(q, context=k, value=v)
+
+        if "attn1_output_patch" in transformer_patches:
+            patch = transformer_patches["attn1_output_patch"]
+            for p in patch:
+                n = p(n, extra_options)
 
         if qn == h * w and hyperTile:
             n = from_tile(n, nh, nw, original_shape)

@@ -10,7 +10,7 @@ from PIL import ImageOps
 import numpy as np
 import torch
 
-from ldm.hidiffusion import ApplyRAUNet
+from ldm.hidiffusion import ApplyRAUNet, ApplyMSWMSAAttention
 import math
 
 
@@ -111,6 +111,13 @@ def load_controlnet(
         ca_range = (0.0, percent_end) # (1.0, 0.0) for < 112x112 - (0.0, 0.05) for 128x128 - (0.0, 0.15) for 192x192 - (0.0, 0.2) for 320x240
     else:
         ca_range = (1.0, 0.0)
+
+    # mswmsa attention
+    attn_use_blocks = ("1,2", "", "11,10,9")
+    attn_range = (0.2, 1.0)
+
+    if False: #size > 144:
+        lora_model_patcher = ApplyMSWMSAAttention().patch(lora_model_patcher, *attn_use_blocks, "percent", *attn_range)
 
     lora_model_patcher = ApplyRAUNet().patch(
             True,  # noqa: FBT003
