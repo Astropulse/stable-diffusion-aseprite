@@ -2536,6 +2536,7 @@ def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning
             attributes = {"sliders": []}
 
             t5_device = device
+            cardMemory = 0
             if device == "cuda" and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
             if cardMemory <= 4.1:
@@ -2845,6 +2846,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     with torch.no_grad():
         with autocast(device, precision, torch.float32):
             t5_device = device
+            cardMemory = 0
             if device == "cuda" and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
             if cardMemory <= 4.1:
@@ -3111,6 +3113,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
             attributes = {"sliders": []}
             
             t5_device = device
+            cardMemory = 0
             if device == "cuda" and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
             if cardMemory <= 4.1:
