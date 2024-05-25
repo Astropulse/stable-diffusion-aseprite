@@ -860,6 +860,8 @@ class BasicTransformerBlock(nn.Module):
         step_percent = transformer_options.get("percent")
         start_time, end_time = transformer_options.get("attn_range", (0.0, 1.0))
         use_mswmsa = transformer_options.get("use_mswmsa")
+        if round(math.sqrt(w * w)) % 2 != 0 and use_mswmsa:
+            use_mswmsa = False
 
         global window_args, last_shift, last_block
         window_args = None
