@@ -145,7 +145,7 @@ class VQModel(pl.LightningModule):
                     np.arange(lower_size, upper_size + 16, 16)
                 )
             if new_resize != x.shape[2]:
-                x = F.interpolate(x, size=new_resize, mode="bicubic")
+                x = F.interpolate(x, size=new_resize, mode="bilinear")
             x = x.detach()
         return x
 

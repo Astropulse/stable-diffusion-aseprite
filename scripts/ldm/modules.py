@@ -1198,7 +1198,7 @@ class HDUpsample(UnetUpsample):
         )
         if False:
             x = F.interpolate(x, size=(shape[0] // 2, shape[1] // 2), mode="nearest")
-        x = torch.nn.functional.interpolate(x, size=shape, mode="bicubic")
+        x = torch.nn.functional.interpolate(x, size=shape, mode="bilinear")
         return self.conv(x)
 
 
@@ -1867,7 +1867,7 @@ class UNetModelDecode(nn.Module):
                 block = transformer_options.get("block", ("", 0))[1]
                 if sigma is not None and (block < 3 or block > 6):
                     sigma /= 16
-                h = torch.nn.functional.interpolate(h, size=(hsp.shape[2], hsp.shape[3]), mode="bicubic")
+                h = torch.nn.functional.interpolate(h, size=(hsp.shape[2], hsp.shape[3]), mode="bilinear")
 
             transformer_options["timestep"] = timestep
             h = torch.cat([h, hsp], dim=1)
