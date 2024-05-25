@@ -1456,6 +1456,29 @@ def rembg(images, modelpath):
     return output
 
 
+def manageModifiers(loras):
+    for lora in loras:
+        _, loraName = os.path.split(lora["file"])
+        if loraName != "none":
+            if os.path.splitext(loraName)[1] == ".pxlm":
+                loraName = os.path.splitext(loraName)[0]
+
+                if loraName == "modern" and lora["weight"] > 60:
+                    rprint(f'[#ab333d]Maximum recommended strength for "Modern" modifier is 60%. Higher values may cause unpredictable results.')
+                elif loraName in "tiling tiling16 tiling32" and lora["weight"] > 70:
+                    rprint(f'[#ab333d]Maximum recommended strength for "Tiling" modifier is 70%. Higher values may cause unpredictable results.')
+                elif loraName == "topdown" and lora["weight"] > 90:
+                    rprint(f'[#ab333d]Maximum recommended strength for "Top-down" modifier is 90%. Higher values may cause unpredictable results.')
+                elif loraName == "gameicons" and lora["weight"] > 60:
+                    rprint(f'[#ab333d]Maximum recommended strength for "Game Items" modifier is 60%. Higher values may cause unpredictable results.')
+                elif loraName == "isometric" and lora["weight"] > 60:
+                    rprint(f'[#ab333d]Maximum recommended strength for "Isometric" modifier is 60%. Higher values may cause unpredictable results.')
+                elif loraName == "frontfacing" and lora["weight"] > 65:
+                    rprint(f'[#ab333d]Maximum recommended strength for "Front-facing" modifier is 65%. Higher values may cause unpredictable results.')
+    
+    return loras
+
+
 # String only manupulation of prompt and negative
 def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
     # Load lora names
@@ -1652,7 +1675,7 @@ def get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, 
 
 
 # Generate the text embeddings for prompts
-def get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision):
+def get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device, device, precision):
     # Create conditioning values for each batch, then unload the text encoder
     negative_conditioning = []
     conditioning = []
@@ -1699,11 +1722,11 @@ def get_text_embed_t5(data, negative_data, runs, batch, total_images, device, pr
             time.sleep(1)
 
     # Load T5
-    t5_loaded = load_T5(device, precision)
+    t5_loaded = load_T5(t5_device, precision)
     global firstT5Encode
 
     if t5_loaded:
-        if device == "cpu" or device == "mps":
+        if t5_device == "cpu" or t5_device == "mps":
             rprint(f"[#c4f129]Generating strong text guidance")
         
         condBatch = batch
@@ -1744,7 +1767,7 @@ def get_text_embed_t5(data, negative_data, runs, batch, total_images, device, pr
 
             condCount += condBatch
         
-        unload_T5(device)
+        unload_T5(t5_device)
         clearCache()
 
     return conditioning, negative_conditioning, uniform_conds
@@ -2153,6 +2176,9 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
         else:
             loadedLoras.append(None)
 
+    # Manage modifiers
+    loras = manageModifiers(loras)
+
     # Patch tiling for model and modelTA
     model, modelFS, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV)
     
@@ -2164,12 +2190,17 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     
     with torch.no_grad():
         with autocast(device, precision, torch.float32):
+            t5_device = device
             if device == "cuda" and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-            else:
+            if cardMemory <= 4.1:
                 cardMemory = psutil.virtual_memory().available / (1024 ** 3)
+                if torch.backends.mps.is_available():
+                    t5_device = "mps"
+                else:
+                    t5_device = "cpu"
             if use_ella and cardMemory >= 4:
-                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision)
+                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device, device, precision)
                 conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision)
             else:
                 if use_ella:
@@ -2379,6 +2410,9 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
         else:
             loadedLoras.append(None)
 
+    # Manage modifiers
+    loras = manageModifiers(loras)
+
     # Patch tiling for model and modelTA
     model, modelFS, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV)
 
@@ -2421,12 +2455,17 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
             #attributes = {"sliders": [{"token": "mountains", "neg_token": "lakes", "weight": 0.5}, {"token": "raven", "weight": 0.3}]}
             attributes = {"sliders": []}
             
+            t5_device = device
             if device == "cuda" and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
-            else:
+            if cardMemory <= 4.1:
                 cardMemory = psutil.virtual_memory().available / (1024 ** 3)
+                if torch.backends.mps.is_available():
+                    t5_device = "mps"
+                else:
+                    t5_device = "cpu"
             if use_ella and cardMemory >= 4:
-                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, device, precision)
+                t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device, device, precision)
                 conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
             else:
                 if use_ella:
