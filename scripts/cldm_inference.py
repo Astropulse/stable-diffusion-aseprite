@@ -126,10 +126,10 @@ def load_controlnet(
             "percent",
             *ra_range,
             False,  # noqa: FBT003
-            "bicubic",
+            "bilinear",
             *ca_range,
             *ca_use_blocks,
-            "bicubic",
+            "bilinear",
         )
 
     return lora_model_patcher, cldm_conditioning, cldm_negative_conditioning

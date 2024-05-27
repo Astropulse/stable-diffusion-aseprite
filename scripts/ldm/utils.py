@@ -636,7 +636,7 @@ except ImportError:
         samples,
         width,
         height,
-        mode="bicubic",
+        mode="bilinear",
         sigma=None,  # noqa: ARG001
     ):
         if mode == "bislerp":
