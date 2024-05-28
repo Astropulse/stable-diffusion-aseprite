@@ -227,7 +227,7 @@ def check_commercial_gpus(gpu_name):
 def get_precision(device, precision):
     model_precision = torch.float32
     vae_precision = torch.float32
-    if device == "cuda" and torch.cuda.is_available() and not precision == "fp32":
+    if "cuda" in device and torch.cuda.is_available() and not precision == "fp32":
 
         gpu_name = torch.cuda.get_device_name(device)
 
@@ -345,7 +345,7 @@ def get_precision(device, precision):
 def autocast(device, precision, dtype = torch.float32):
     if precision == "fp8":
         dtype = torch.bfloat16
-    if device == "cuda" and torch.cuda.is_available():
+    if "cuda" in device and torch.cuda.is_available():
         gpu_properties = torch.cuda.get_device_properties(device)
         gpu_name = gpu_properties.name
         if "NVIDIA" in gpu_name:
@@ -743,7 +743,7 @@ def load_T5(device, precision):
 
 def unload_ella(device):
     global modelELLA
-    if device == "cuda" and modelELLA is not None:
+    if "cuda" in device and modelELLA is not None:
         mem = torch.cuda.memory_allocated() / 1e6
         modelELLA.to("cpu")
         # Wait until memory usage decreases
@@ -755,7 +755,7 @@ def unload_T5(device, force=False):
     global modelT5
     cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
     if cpuMemoryUnused > 8 and not force:
-        if device == "cuda" and modelT5 is not None:
+        if "cuda" in device and modelT5 is not None:
             mem = torch.cuda.memory_allocated() / 1e6
             modelT5.to("cpu")
             # Wait until memory usage decreases
@@ -800,7 +800,7 @@ def load_model(modelFileString, config, device, precision, optimized):
     if modelSettings != modelParams:
         timer = time.time()
 
-        if device == "cuda" and not torch.cuda.is_available():
+        if "cuda" in device and not torch.cuda.is_available():
             if torch.backends.mps.is_available():
                 device = "mps"
             else:
@@ -833,7 +833,7 @@ def load_model(modelFileString, config, device, precision, optimized):
 
         # Determine if turbo mode is enabled
         turbo = True
-        if optimized and device == "cuda":
+        if optimized and "cuda" in device:
             turbo = False
 
         # Load the model's state dictionary from the specified file
@@ -904,7 +904,7 @@ def load_model(modelFileString, config, device, precision, optimized):
             _, _ = modelFS.load_state_dict(vae, strict=False)
 
         # Handle float16 and float32 conditions
-        if device == "cuda" and precision != "fp8":
+        if "cuda" in device and precision != "fp8":
             model.to(model_precision)
             modelCS.to(model_precision)
             modelTA.to(vae_precision)
@@ -912,7 +912,7 @@ def load_model(modelFileString, config, device, precision, optimized):
                 modelFS.to(vae_precision)
             precision = model_precision
         # Handle float8 condition
-        elif device == "cuda":
+        elif "cuda" in device:
             model.to(model_precision)
             for layer in flatten(modelCS):
                 if isinstance(layer, torch.nn.Linear):
@@ -1664,7 +1664,7 @@ def get_text_embed_clip(data, negative_data, runs, batch, total_images, gWidth, 
         condCount += condBatch
 
     # Move modelCS to CPU if necessary to free up GPU memory
-    if device == "cuda":
+    if "cuda" in device:
         mem = torch.cuda.memory_allocated() / 1e6
         modelCS.to("cpu")
         # Wait until memory usage decreases
@@ -1714,7 +1714,7 @@ def get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device,
         condCount += condBatch
 
     # Move modelCS to CPU if necessary to free up GPU memory
-    if device == "cuda":
+    if "cuda" in device:
         mem = torch.cuda.memory_allocated() / 1e6
         modelCS.to("cpu")
         # Wait until memory usage decreases
@@ -1905,7 +1905,7 @@ def render(modelFS, modelTA, modelPV, samples_ddim, device, precision, H, W, pix
                 x_sample = x_sample.cpu().movedim(1, -1)
                 x_sample = 255.0 * x_sample[0].cpu().numpy()
 
-                if device == "cuda":
+                if "cuda" in device:
                     mem = torch.cuda.memory_allocated(device=device) / 1e6
                     modelFS.to("cpu")
                     # Wait until memory usage decreases
@@ -2053,7 +2053,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     timer = time.time()
     
     # Check gpu availability
-    if device == "cuda" and not torch.cuda.is_available():
+    if "cuda" in device and not torch.cuda.is_available():
         if torch.backends.mps.is_available():
             device = "mps"
         else:
@@ -2192,7 +2192,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
         with autocast(device, precision, torch.float32):
             t5_device = device
             cardMemory = 0
-            if device == "cuda" and torch.cuda.is_available():
+            if "cuda" in device and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
             if cardMemory <= 4.1:
                 cardMemory = psutil.virtual_memory().available / (1024 ** 3)
@@ -2285,7 +2285,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     timer = time.time()
 
     # Check gpu availability
-    if device == "cuda" and not torch.cuda.is_available():
+    if "cuda" in device and not torch.cuda.is_available():
         if torch.backends.mps.is_available():
             device = "mps"
         else:
@@ -2458,7 +2458,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
             
             t5_device = device
             cardMemory = 0
-            if device == "cuda" and torch.cuda.is_available():
+            if "cuda" in device and torch.cuda.is_available():
                 cardMemory = torch.cuda.get_device_properties("cuda").total_memory / 1073741824
             if cardMemory <= 4.1:
                 cardMemory = psutil.virtual_memory().available / (1024 ** 3)

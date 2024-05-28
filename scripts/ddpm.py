@@ -680,7 +680,7 @@ class UNet(DDPM):
             self.alphas_cumprod.shape[0] == self.num_timesteps
         ), "alphas have to be defined for each timestep"
 
-        to_torch = lambda x: x.to(self.cdevice)
+        to_torch = lambda x: x.to(self.cdevice, dtype=torch.float32)
         self.register_buffer1("betas", to_torch(self.betas))
         self.register_buffer1("alphas_cumprod", to_torch(self.alphas_cumprod))
         # ddim sampling parameters
