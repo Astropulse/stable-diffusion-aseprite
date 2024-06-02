@@ -593,10 +593,10 @@ def convert_time(ms, time_mode, start_time, end_time) -> tuple:
                 raise ValueError(
                     "invalid value for start percent",
                 )
-            if end_time > 1.0 or end_time < 0.0:
-                raise ValueError(
-                    "invalid value for end percent",
-                )
+            if end_time > 1.0:
+                end_time = 1.0
+            elif end_time < 0.0:
+                end_time = 0.0
         return (ms.percent_to_sigma(start_time), ms.percent_to_sigma(end_time))
     raise ValueError("invalid time mode")
 
@@ -617,28 +617,13 @@ def check_time(options, start_sigma, end_sigma):
     return sigma <= start_sigma and sigma >= end_sigma
 
 
-try:
-    bleh = importlib.import_module(
-        "custom_nodes.ComfyUI-bleh",
-    )
-    bleh_latentutils = bleh.py.latent_utils
-    bleh_version = getattr(bleh, "BLEH_VERSION", -1)
-    if bleh_version < 0:
-
-        def scale_samples(*args: list, sigma=None, **kwargs: dict):  # noqa: ARG001
-            return bleh_latentutils.scale_samples(*args, **kwargs)
-    else:
-        scale_samples = bleh_latentutils.scale_samples
-    UPSCALE_METHODS = bleh_latentutils.UPSCALE_METHODS
-except ImportError:
-
-    def scale_samples(
-        samples,
-        width,
-        height,
-        mode="bilinear",
-        sigma=None,  # noqa: ARG001
-    ):
-        if mode == "bislerp":
-            return bislerp(samples, width, height)
-        return torchf.interpolate(samples, size=(height, width), mode=mode)
+def scale_samples(
+    samples,
+    width,
+    height,
+    mode="bilinear",
+    sigma=None,  # noqa: ARG001
+):
+    if mode == "bislerp":
+        return bislerp(samples, width, height)
+    return torchf.interpolate(samples, size=(height, width), mode=mode)

@@ -6,6 +6,7 @@ import psutil
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+from typing import Optional
 from torch import Tensor, nn
 from torch.nn import MultiheadAttention
 from torch.nn.functional import silu
@@ -54,13 +55,7 @@ def count_flops_attn(model, _x, y):
 
 
 def make_attn(in_channels, attn_type="vanilla"):
-    assert attn_type in ["vanilla", "linear", "none"], f"attn_type {attn_type} unknown"
-    if attn_type == "vanilla":
-        return AttnBlock(in_channels)
-    elif attn_type == "none":
-        return nn.Identity(in_channels)
-    else:
-        return LinAttnBlock(in_channels)
+    return AttnBlock(in_channels)
 
 
 def Normalize(in_channels, num_groups=32):
@@ -86,37 +81,7 @@ def get_mem_free_total(device):
     return mem_free_total
 
 
-class LinearAttention(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32):
-        super().__init__()
-        self.heads = heads
-        hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        qkv = self.to_qkv(x)
-        q, k, v = rearrange(
-            qkv, "b (qkv heads c) h w -> qkv b heads c (h w)", heads=self.heads, qkv=3
-        )
-        k = k.softmax(dim=-1)
-        context = torch.einsum("bhdn,bhen->bhde", k, v)
-        out = torch.einsum("bhde,bhdn->bhen", context, q)
-        out = rearrange(
-            out, "b heads c (h w) -> b (heads c) h w", heads=self.heads, h=h, w=w
-        )
-        return self.to_out(out)
-
-
-class LinAttnBlock(LinearAttention):
-    """to match AttnBlock usage"""
-
-    def __init__(self, in_channels):
-        super().__init__(dim=in_channels, heads=1, dim_head=in_channels)
-
-
-class AttnBlock(nn.Module):
+class AttnBlockBasic(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         self.in_channels = in_channels
@@ -154,6 +119,119 @@ class AttnBlock(nn.Module):
         h_ = self.proj_out(h_)
 
         return x + h_
+
+
+def get_free_memory(device):
+    if device.type == "cpu" or device.type == "mps":
+        mem_free_total = psutil.virtual_memory().available
+    else:
+        stats = torch.cuda.memory_stats(device)
+        mem_active = stats['active_bytes.all.current']
+        mem_reserved = stats['reserved_bytes.all.current']
+        mem_free_cuda, _ = torch.cuda.mem_get_info(device)
+        mem_free_torch = mem_reserved - mem_active
+        mem_free_total = mem_free_cuda + mem_free_torch
+    
+    return mem_free_total
+
+def slice_attention(q, k, v):
+    r1 = torch.zeros_like(k, device=q.device)
+    scale = (int(q.shape[-1])**(-0.5))
+
+    mem_free_total = get_free_memory(q.device)
+
+    gb = 1024 ** 3
+    tensor_size = q.shape[0] * q.shape[1] * k.shape[2] * q.element_size()
+    modifier = 3 if q.element_size() == 2 else 2.5
+    mem_required = tensor_size * modifier
+    steps = 1
+
+    if mem_required > mem_free_total:
+        steps = 2**(math.ceil(math.log(mem_required / mem_free_total, 2)))
+
+    while True:
+        try:
+            slice_size = q.shape[1] // steps if (q.shape[1] % steps) == 0 else q.shape[1]
+            for i in range(0, q.shape[1], slice_size):
+                end = i + slice_size
+                s1 = torch.bmm(q[:, i:end], k) * scale
+
+                s2 = torch.nn.functional.softmax(s1, dim=2).permute(0,2,1)
+                del s1
+
+                r1[:, :, i:end] = torch.bmm(v, s2)
+                del s2
+            break
+        except Exception as e:
+            torch.cuda.empty_cache()
+            if torch.backends.mps.is_available() and q.device.type != "cpu":
+                try:
+                    torch.mps.empty_cache()
+                except:
+                    pass
+            torch.cuda.ipc_collect()
+            steps *= 2
+            if steps > 128:
+                raise e
+
+    return r1
+
+def pytorch_attention(q, k, v):
+    # compute attention
+    B, C, H, W = q.shape
+    q, k, v = map(
+        lambda t: t.view(B, 1, C, -1).transpose(2, 3).contiguous(),
+        (q, k, v),
+    )
+
+    try:
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+        out = out.transpose(2, 3).reshape(B, C, H, W)
+    except:
+        out = slice_attention(q.view(B, -1, C), k.view(B, -1, C).transpose(1, 2), v.view(B, -1, C).transpose(1, 2)).reshape(B, C, H, W)
+    return out
+
+class AttnBlock(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+
+        self.norm = Normalize(in_channels)
+        self.q = nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.k = nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.v = nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.proj_out = nn.Conv2d(in_channels,
+                                        in_channels,
+                                        kernel_size=1,
+                                        stride=1,
+                                        padding=0)
+
+        self.optimized_attention = pytorch_attention
+
+    def forward(self, x):
+        h_ = x
+        h_ = self.norm(h_)
+        q = self.q(h_)
+        k = self.k(h_)
+        v = self.v(h_)
+
+        h_ = self.optimized_attention(q, k, v)
+
+        h_ = self.proj_out(h_)
+
+        return x+h_
 
 
 class Upsample(nn.Module):

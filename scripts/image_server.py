@@ -173,6 +173,7 @@ def clearCache():
             torch.mps.empty_cache()
         except:
             pass
+    torch.cuda.ipc_collect()
 
 
 # Play sound file
@@ -1793,7 +1794,7 @@ def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
             # Defaults
             prefix = "pixel, pixel art"
             suffix = ""
-            negativeList = [negative, "frame, blurry, nude, nsfw, border, signature, snowglobe, letterbox"]
+            negativeList = [negative, "frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
 
             # Lora specific modifications
             if any(f"{_}.pxlm" in loraNames for _ in [
@@ -2556,8 +2557,56 @@ def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning
             return conditioning, negative_conditioning, encoded_latent, steps, scale, runs, data, negative_data, seeds, batch, raw_loras
 
 
+def palette_from_source(source, paletteURL, palettes):
+    # Check if a palette URL is provided and try to download the palette image
+    paletteImage = None
+    if source != "None":
+        if source == "URL":
+            try:
+                paletteImage = Image.open(BytesIO(requests.get(paletteURL).content)).convert("RGB")
+            except:
+                rprint(f"\n[#ab333d]ERROR: URL {paletteURL} cannot be reached or is not an image\nReverting to Adaptive palette")
+                paletteImage = None
+        elif palettes != []:
+            try:
+                paletteImage = decodeImage(palettes[0]).convert("RGB")
+            except:
+                pass
+
+        # Determine the number of colors based on the palette or user input
+        if paletteImage is not None:
+            numColors = len(paletteImage.getcolors(16777216))
+            if numColors > 256:
+                paletteImage = paletteImage.quantize(colors=256, method=2, kmeans=256, dither=0).convert("RGB")
+
+    return paletteImage
+
+
+def convert_palette(image, paletteImage, weight = 1.0):
+    numColors = len(paletteImage.getcolors(16777216))
+    
+    # Extract palette colors
+    palette = np.concatenate([x[1] for x in paletteImage.getcolors(16777216)]).tolist()
+
+    # Create a new palette image
+    tempPaletteImage = Image.new("P", (len(palette) // 3, 1))
+    tempPaletteImage.putpalette(palette)
+
+    # Perform quantization without dithering
+    out_image = image.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
+
+    if weight < 1.0:
+        out_image = out_image.convert("RGBA")
+        # Adjust the overlay image's transparency
+        alpha = out_image.getchannel('A')
+        alpha = alpha.point(lambda p: p * weight)  # Adjust opacity to 50%, change 0.5 to your desired opacity level
+        out_image.putalpha(alpha)
+        out_image = Image.alpha_composite(image.convert('RGBA'), out_image).convert("RGB")
+    return out_image
+
+
 # Run controlnet inference
-def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None):
+def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None, paletteImage = None):
     timer = time.time()
     global modelCS
     global modelFS
@@ -2599,7 +2648,12 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     rprint(f"[#48a971]Patching model for controlnet")
     model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
 
+    # Palette control
+    if paletteImage is not None:
+        rprint(f"Generating palette conditioning image")
+
     precision, model_precision, vae_precision = get_precision(device, precision)
+    precision_scope = autocast(device, precision, model_precision)
 
     with torch.no_grad():
         base_count = 0
@@ -2609,13 +2663,91 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
         for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
             batch = min(batch, total_images - base_count)
 
+            if paletteImage is not None:
+                # Pre-generate with fixed settings
+                pre_embed = None
+                if image_embed[run] is not None:
+                    pre_embed = image_embed[run]
+                
+                pre_steps = steps
+                steps = round(steps * 0.6)
+
+                for step, samples_ddim in enumerate(sample_cldm(
+                    model_patcher,
+                    cldm_cond,
+                    cldm_uncond,
+                    seed,
+                    pre_steps, # steps,
+                    scale + 2.0, # cfg,
+                    "euler", # sampler,
+                    1, # batch size
+                    W,
+                    H,
+                    pre_embed, # initial latent for img2img
+                    strength, # denoise strength
+                    "kl_optimal" # scheduler
+                )):
+                    if preview:
+                        message = [{"action": "display_title", "type": title, "value": {"text": f"Pre-generating... {step}/{pre_steps} steps in batch {run+1}/{runs}"}}]
+                        # Render and send image previews
+                        if step % math.ceil(math.sqrt(W * H) / 448) == 0:
+                            displayOut = []
+                            x_sample_image = fastRender(modelPV, samples_ddim[0:1], pixelSize, W, H)
+                            x_sample_image = convert_palette(x_sample_image, paletteImage, 0.5)
+                            name = str(seed)
+                            displayOut.append({"name": name, "seed": seed, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                            message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
+                        yield message
+                
+                strength = 0.75
+                
+                x_sample_image, _ = render(modelFS, modelTA, modelPV, samples_ddim[0:1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
+                x_sample_image = convert_palette(x_sample_image, paletteImage, 1.0)
+                x_sample_image = x_sample_image.resize((W, H), resample=Image.Resampling.NEAREST)
+                init_image = load_img(x_sample_image.convert("RGB"), H, W).to(device)
+                
+                encoded_latent = []
+                with precision_scope:
+                    latentBatch = batch
+                    latentCount = 0
+
+                    # Move the initial image to latent space and resize it
+                    init_latent_base = modelTA.encoder(init_image)
+                    init_latent_base = torch.nn.functional.interpolate(init_latent_base, size=(H // 8, W // 8), mode="bilinear") * 6.0
+                    if init_latent_base.shape[0] < latentBatch:
+                        # Create tiles of inputs to match batch arrangement
+                        init_latent_base = init_latent_base.repeat([math.ceil(latentBatch / init_latent_base.shape[0])] + [1] * (len(init_latent_base.shape) - 1))[:latentBatch]
+
+                    for run in range(runs):
+                        if total_images - latentCount < latentBatch:
+                            latentBatch = total_images - latentCount
+
+                            # Slice latents to new batch size
+                            init_latent_base = init_latent_base[:latentBatch]
+
+                        # Encode the scaled latent
+                        encoded_latent.append(init_latent_base)
+                        latentCount += latentBatch
+                image_embed = encoded_latent
+                    
+                # Delete the samples to free up memory
+                del samples_ddim
+
+                # Add lcm
+                raw_loras.append({"sd": load_lora_raw(os.path.join(modelPath, "quality.lcm")), "weight": 30})
+
+                # Add composition controlnet
+                netPath = os.path.join(modelPath, "CONTROLNET")
+                controlnets.append({"model_file": os.path.join(netPath, "Composition.safetensors"), "image": x_sample_image, "weight": 0.8})
+                model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
+
             for step, samples_ddim in enumerate(sample_cldm(
                 model_patcher,
                 cldm_cond,
                 cldm_uncond,
                 seed,
                 steps, # steps,
-                scale + 2.0, # cfg,
+                scale, # cfg,
                 "ddim", # sampler,
                 batch, # batch size
                 W,
@@ -2631,6 +2763,8 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                         displayOut = []
                         for i in range(batch):
                             x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
+                            if paletteImage is not None:
+                                x_sample_image = convert_palette(x_sample_image, paletteImage, step/steps)
                             name = str(seed+i)
                             displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
                         message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
@@ -2638,6 +2772,8 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
             
             for i in range(batch):
                 x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
+                if paletteImage is not None:
+                    x_sample_image = convert_palette(x_sample_image, paletteImage)
                 if total_images > 1 and (base_count + 1) < total_images:
                     play("iteration.wav")
 
@@ -2690,7 +2826,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
 
                 output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
-        elif post:
+        elif post and paletteImage is None:
             output = palettizeOutput(output)
 
         final = []
@@ -3863,7 +3999,13 @@ async def server(websocket):
 
                                             netPath = os.path.join(modelPath, "CONTROLNET")
                                             controlnets.append({"model_file": os.path.join(netPath, f"{controlnet['model']}.safetensors"), "image": image, "weight": controlnet["weight"]/100})
-                                        
+                            
+                            paletteImage = palette_from_source(
+                                values["source"],
+                                values["url"],
+                                values["palettes"]
+                            )
+
                             for result in neural_inference(
                                 modelData["file"],
                                 title,
@@ -3891,7 +4033,8 @@ async def server(websocket):
                                 values["send_progress"],
                                 values["use_pixelvae"],
                                 False,
-                                values["post_process"]
+                                values["post_process"],
+                                paletteImage=paletteImage
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
