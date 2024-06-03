@@ -3890,7 +3890,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
-                                False,
+                                None,
                                 values["post_process"]
                             ):
                                 if values["send_progress"]:
@@ -4068,7 +4068,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
-                                False,
+                                None,
                                 values["post_process"],
                                 decodeImage(values["images"][len(values["images"])-1])
                             ):
