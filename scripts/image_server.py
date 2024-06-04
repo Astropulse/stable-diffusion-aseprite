@@ -176,6 +176,10 @@ def clearCache():
     torch.cuda.ipc_collect()
 
 
+def oom_error(traceback):
+    return ("torch.cuda.OutOfMemoryError" in traceback or "out of memory" in traceback)
+
+
 # Play sound file
 def audioThread(file):
     try:
@@ -250,7 +254,7 @@ def get_precision(device, precision):
         gpu_name = torch.cuda.get_device_name(device)
 
         # If GPU is nvidia 10xx force fp32 precision
-        if gpu_name.startswith("NVIDIA GeForce GTX 10"):
+        if gpu_name.startswith("NVIDIA GeForce GTX 10") or gpu_name.startswith("NVIDIA GeForce GTX 9"):
             precision = "fp32"
             model_precision = torch.float32
             vae_precision = torch.float32
@@ -1221,7 +1225,7 @@ def kCentroidVerbose(images, width, height, centroids, outline):
             resized_image = kCentroid(image, int(width), int(height), int(centroids))
 
         name = str(hash(str([image, width, height, centroids, count])))
-        output.append({"name": name, "format": "png", "image": encodeImage(resized_image, "png")})
+        output.append({"name": name, "format": "bytes", "image": encodeImage(resized_image, "bytes"), "width": resized_image.width, "height": resized_image.height})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -1307,7 +1311,7 @@ def pixelDetectVerbose(image):
             image_indexed = downscale.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
 
     play("batch.wav")
-    return [{"name": str(hash(str(image))), "format": "png", "image": encodeImage(image_indexed, "png")}]
+    return [{"name": str(hash(str(image))), "format": "bytes", "image": encodeImage(image_indexed, "bytes"), "width": image_indexed.width, "height": image_indexed.height}]
 
 
 # Denoises an image using quantization
@@ -1576,7 +1580,7 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
         count += 1
 
         name = str(hash(str([count, source, paletteURL, palettes, colors, dithering, strength, denoise, smoothness, intensity])))
-        output.append({"name": name, "format": "png", "image": encodeImage(image_indexed, "png")})
+        output.append({"name": name, "format": "bytes", "image": encodeImage(image_indexed, "bytes"), "width": image_indexed.width, "height": image_indexed.height})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -1635,7 +1639,7 @@ def rembg(images, modelpath):
             masked_image = masked_image.resize((image.width, image.height), resample=Image.Resampling.NEAREST)
 
             name = str(hash(str([count, image])))
-            output.append({"name": name, "format": "png", "image": encodeImage(masked_image, "png")})
+            output.append({"name": name, "format": "bytes", "image": encodeImage(masked_image, "bytes"), "width": masked_image.width, "height": masked_image.height})
 
             if image != images[-1]:
                 play("iteration.wav")
@@ -2285,6 +2289,7 @@ def paletteGen(prompt, colors, seed, device, precision):
 
     # Perform k-centroid downscaling on the image
     image = decodeImage(image["value"]["images"][0])
+    image.save("test.png")
     image = kCentroid(image, int(image.width/(512/base)), 1, 2)
 
     # Iterate over the pixels in the image and set corresponding palette colors
@@ -2297,7 +2302,7 @@ def paletteGen(prompt, colors, seed, device, precision):
 
     name = hash(str([prompt, colors, seed, device]))
     rprint(f"[#c4f129]Image converted to color palette with [#48a971]{colors}[#c4f129] colors")
-    return [{"name": f"palette{name}", "format": "png", "image": encodeImage(palette.convert("RGB"), "png")}]
+    return [{"name": f"palette{name}", "format": "bytes", "image": encodeImage(palette.convert("RGB"), "bytes"), "width": palette.width, "height": palette.height}]
 
 
 # Wave pattern for HSV -> RGB lora conversion
@@ -2557,6 +2562,7 @@ def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning
             return conditioning, negative_conditioning, encoded_latent, steps, scale, runs, data, negative_data, seeds, batch, raw_loras
 
 
+# Silently grab a color palette image from a url or image bytes
 def palette_from_source(source, paletteURL, palettes):
     # Check if a palette URL is provided and try to download the palette image
     paletteImage = None
@@ -2582,6 +2588,7 @@ def palette_from_source(source, paletteURL, palettes):
     return paletteImage
 
 
+# Convert an image to a color palette with optional overlay weight
 def convert_palette(image, paletteImage, weight = 1.0):
     numColors = len(paletteImage.getcolors(16777216))
     
@@ -2649,6 +2656,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
 
     # Palette control
+    batch_orig = batch
     if paletteImage is not None:
         rprint(f"Generating palette conditioning image")
 
@@ -2658,6 +2666,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     with torch.no_grad():
         base_count = 0
         output = []
+        encoded_latent = []
 
         # Iterate over the specified number of iterations
         for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
@@ -2670,7 +2679,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     pre_embed = image_embed[run]
                 
                 pre_steps = steps
-                steps = round(steps * 0.6)
+                full_steps = round(steps * 0.6)
 
                 for step, samples_ddim in enumerate(sample_cldm(
                     model_patcher,
@@ -2706,7 +2715,6 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                 x_sample_image = x_sample_image.resize((W, H), resample=Image.Resampling.NEAREST)
                 init_image = load_img(x_sample_image.convert("RGB"), H, W).to(device)
                 
-                encoded_latent = []
                 with precision_scope:
                     latentBatch = batch
                     latentCount = 0
@@ -2718,17 +2726,15 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                         # Create tiles of inputs to match batch arrangement
                         init_latent_base = init_latent_base.repeat([math.ceil(latentBatch / init_latent_base.shape[0])] + [1] * (len(init_latent_base.shape) - 1))[:latentBatch]
 
-                    for run in range(runs):
-                        if total_images - latentCount < latentBatch:
-                            latentBatch = total_images - latentCount
+                    if total_images - latentCount < latentBatch:
+                        latentBatch = total_images - latentCount
 
-                            # Slice latents to new batch size
-                            init_latent_base = init_latent_base[:latentBatch]
+                        # Slice latents to new batch size
+                        init_latent_base = init_latent_base[:latentBatch]
 
-                        # Encode the scaled latent
-                        encoded_latent.append(init_latent_base)
-                        latentCount += latentBatch
-                image_embed = encoded_latent
+                    # Encode the scaled latent
+                    encoded_latent.append(init_latent_base)
+                    latentCount += latentBatch
                     
                 # Delete the samples to free up memory
                 del samples_ddim
@@ -2740,19 +2746,22 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                 netPath = os.path.join(modelPath, "CONTROLNET")
                 controlnets.append({"model_file": os.path.join(netPath, "Composition.safetensors"), "image": x_sample_image, "weight": 0.8})
                 model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
+            else:
+                encoded_latent = image_embed
+                full_steps = steps
 
             for step, samples_ddim in enumerate(sample_cldm(
                 model_patcher,
                 cldm_cond,
                 cldm_uncond,
                 seed,
-                steps, # steps,
+                full_steps, # steps,
                 scale, # cfg,
                 "ddim", # sampler,
                 batch, # batch size
                 W,
                 H,
-                image_embed[run], # initial latent for img2img
+                encoded_latent[run], # initial latent for img2img
                 strength, # denoise strength
                 "kl_optimal" # scheduler
             )):
@@ -2782,7 +2791,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                 if init_img is not None:
                     name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
                 name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
-                output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                 seed += 1
                 base_count += 1
@@ -2831,7 +2840,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         unload_cldm()
@@ -2869,7 +2878,8 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Curves defined by https://www.desmos.com/calculator/kny0embnkg
     steps = round(3.4 + ((quality ** 2) / 2))
     # Adjust for size
-    steps = round(steps * (1 + ((((size - 320) / 320) - 1) / 5) ** 2))
+    steps = min(40, round(steps * (1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
+
     scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
@@ -3041,7 +3051,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                     seeds.append(str(seed))
 
                     name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed, post])) & 0x7FFFFFFFFFFFFFFF)
-                    output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                    output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                     seed += 1
                     base_count += 1
@@ -3065,7 +3075,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
@@ -3113,7 +3123,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Curves defined by https://www.desmos.com/calculator/kny0embnkg
     steps = round(3.4 + ((quality ** 2) / 1.6))
     # Adjust for size
-    steps = round(steps * max(1, 1 + ((((size - 320) / 320) - 1) / 5) ** 2))
+    steps = min(40, round(steps * max(1, 1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
     scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
@@ -3307,7 +3317,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
                     seeds.append(str(seed))
                     name = str(hash(str([data[i], negative_data[i], init_img.resize((16, 16), resample=Image.Resampling.NEAREST), strength, translate, promptTuning, W, H, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed, post])) & 0x7FFFFFFFFFFFFFFF)
-                    output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                    output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                     seed += 1
                     base_count += 1
@@ -3331,7 +3341,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield ["", {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
@@ -3594,7 +3604,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -3687,7 +3697,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -3777,7 +3787,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -3865,7 +3875,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -3927,7 +3937,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -4032,7 +4042,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
-                                False,
+                                None,
                                 values["post_process"],
                                 paletteImage=paletteImage
                             ):
@@ -4047,7 +4057,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -4112,7 +4122,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size. If samples are at 100%, this was caused by the VAE running out of memory, try enabling the Fast Pixel Decoder")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -4185,6 +4195,12 @@ async def server(websocket):
                                         netPath = os.path.join(modelPath, "CONTROLNET")
                                         controlnets.append({"model_file": os.path.join(netPath, f"{controlnet['model']}.safetensors"), "image": image, "weight": controlnet["weight"]/100})
 
+                            paletteImage = palette_from_source(
+                                values["source"],
+                                values["url"],
+                                values["palettes"]
+                            )
+
                             for result in neural_inference(
                                 modelData["file"],
                                 title,
@@ -4211,9 +4227,10 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
-                                False,
+                                None,
                                 values["post_process"],
-                                decodeImage(values["images"][len(values["images"])-1])
+                                decodeImage(values["images"][len(values["images"])-1]),
+                                paletteImage=paletteImage
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
@@ -4226,7 +4243,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
@@ -4260,7 +4277,7 @@ async def server(websocket):
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
                                 rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
-                            elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
+                            elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
