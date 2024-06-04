@@ -2296,7 +2296,7 @@ def paletteGen(prompt, colors, seed, device, precision):
 
     name = hash(str([prompt, colors, seed, device]))
     rprint(f"[#c4f129]Image converted to color palette with [#48a971]{colors}[#c4f129] colors")
-    return [{"name": f"palette{name}", "format": "bytes", "image": encodeImage(palette.convert("RGB"), "bytes")}]
+    return [{"name": f"palette{name}", "format": "bytes", "image": encodeImage(palette.convert("RGB"), "bytes"), "width": palette.width, "height": palette.height}]
 
 
 # Wave pattern for HSV -> RGB lora conversion
