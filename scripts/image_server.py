@@ -1220,7 +1220,7 @@ def kCentroidVerbose(images, width, height, centroids, outline):
             resized_image = kCentroid(image, int(width), int(height), int(centroids))
 
         name = str(hash(str([image, width, height, centroids, count])))
-        output.append({"name": name, "format": "png", "image": encodeImage(resized_image, "png")})
+        output.append({"name": name, "format": "bytes", "image": encodeImage(resized_image, "bytes")})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -1306,7 +1306,7 @@ def pixelDetectVerbose(image):
             image_indexed = downscale.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
 
     play("batch.wav")
-    return [{"name": str(hash(str(image))), "format": "png", "image": encodeImage(image_indexed, "png")}]
+    return [{"name": str(hash(str(image))), "format": "bytes", "image": encodeImage(image_indexed, "bytes")}]
 
 
 # Denoises an image using quantization
@@ -1575,7 +1575,7 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
         count += 1
 
         name = str(hash(str([count, source, paletteURL, palettes, colors, dithering, strength, denoise, smoothness, intensity])))
-        output.append({"name": name, "format": "png", "image": encodeImage(image_indexed, "png")})
+        output.append({"name": name, "format": "bytes", "image": encodeImage(image_indexed, "bytes")})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -1634,7 +1634,7 @@ def rembg(images, modelpath):
             masked_image = masked_image.resize((image.width, image.height), resample=Image.Resampling.NEAREST)
 
             name = str(hash(str([count, image])))
-            output.append({"name": name, "format": "png", "image": encodeImage(masked_image, "png")})
+            output.append({"name": name, "format": "bytes", "image": encodeImage(masked_image, "bytes")})
 
             if image != images[-1]:
                 play("iteration.wav")
@@ -2296,7 +2296,7 @@ def paletteGen(prompt, colors, seed, device, precision):
 
     name = hash(str([prompt, colors, seed, device]))
     rprint(f"[#c4f129]Image converted to color palette with [#48a971]{colors}[#c4f129] colors")
-    return [{"name": f"palette{name}", "format": "png", "image": encodeImage(palette.convert("RGB"), "png")}]
+    return [{"name": f"palette{name}", "format": "bytes", "image": encodeImage(palette.convert("RGB"), "bytes")}]
 
 
 # Wave pattern for HSV -> RGB lora conversion
@@ -2646,7 +2646,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                 if init_img is not None:
                     name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
                 name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
-                output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                 seed += 1
                 base_count += 1
@@ -2695,7 +2695,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         unload_cldm()
@@ -3171,7 +3171,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
                     seeds.append(str(seed))
                     name = str(hash(str([data[i], negative_data[i], init_img.resize((16, 16), resample=Image.Resampling.NEAREST), strength, translate, promptTuning, W, H, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed, post])) & 0x7FFFFFFFFFFFFFFF)
-                    output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                    output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                     seed += 1
                     base_count += 1
@@ -3195,7 +3195,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield ["", {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
