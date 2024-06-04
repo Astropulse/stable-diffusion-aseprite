@@ -1220,7 +1220,7 @@ def kCentroidVerbose(images, width, height, centroids, outline):
             resized_image = kCentroid(image, int(width), int(height), int(centroids))
 
         name = str(hash(str([image, width, height, centroids, count])))
-        output.append({"name": name, "format": "bytes", "image": encodeImage(resized_image, "bytes")})
+        output.append({"name": name, "format": "bytes", "image": encodeImage(resized_image, "bytes"), "width": resized_image.width, "height": resized_image.height})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -1306,7 +1306,7 @@ def pixelDetectVerbose(image):
             image_indexed = downscale.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
 
     play("batch.wav")
-    return [{"name": str(hash(str(image))), "format": "bytes", "image": encodeImage(image_indexed, "bytes")}]
+    return [{"name": str(hash(str(image))), "format": "bytes", "image": encodeImage(image_indexed, "bytes"), "width": image_indexed.width, "height": image_indexed.height}]
 
 
 # Denoises an image using quantization
@@ -1575,7 +1575,7 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
         count += 1
 
         name = str(hash(str([count, source, paletteURL, palettes, colors, dithering, strength, denoise, smoothness, intensity])))
-        output.append({"name": name, "format": "bytes", "image": encodeImage(image_indexed, "bytes")})
+        output.append({"name": name, "format": "bytes", "image": encodeImage(image_indexed, "bytes"), "width": image_indexed.width, "height": image_indexed.height})
 
         if image != images[-1]:
             play("iteration.wav")
@@ -1634,7 +1634,7 @@ def rembg(images, modelpath):
             masked_image = masked_image.resize((image.width, image.height), resample=Image.Resampling.NEAREST)
 
             name = str(hash(str([count, image])))
-            output.append({"name": name, "format": "bytes", "image": encodeImage(masked_image, "bytes")})
+            output.append({"name": name, "format": "bytes", "image": encodeImage(masked_image, "bytes"), "width": masked_image.width, "height": masked_image.height})
 
             if image != images[-1]:
                 play("iteration.wav")
