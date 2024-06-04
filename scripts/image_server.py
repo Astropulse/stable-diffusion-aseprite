@@ -2905,7 +2905,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                     seeds.append(str(seed))
 
                     name = str(hash(str([data[i], negative_data[i], translate, promptTuning, W, H, quality, scale, device, loras, tilingX, tilingY, pixelvae, seed, post])) & 0x7FFFFFFFFFFFFFFF)
-                    output.append({"name": name, "seed": seed, "format": "png", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                    output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
 
                     seed += 1
                     base_count += 1
@@ -2929,7 +2929,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
         final = []
         for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], "png"), "width": image["width"], "height": image["height"]})
+            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
         play("batch.wav")
         rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
         yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
