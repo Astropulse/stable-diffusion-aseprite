@@ -593,10 +593,10 @@ def convert_time(ms, time_mode, start_time, end_time) -> tuple:
                 raise ValueError(
                     "invalid value for start percent",
                 )
-            if end_time > 1.0 or end_time < 0.0:
-                raise ValueError(
-                    "invalid value for end percent",
-                )
+            if end_time > 1.0:
+                end_time = 1.0
+            elif end_time < 0.0:
+                end_time = 0.0
         return (ms.percent_to_sigma(start_time), ms.percent_to_sigma(end_time))
     raise ValueError("invalid time mode")
 
