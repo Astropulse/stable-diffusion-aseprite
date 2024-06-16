@@ -879,6 +879,7 @@ def load_blip(path):
         return None
 
 
+# Load ELLA from conditioning helper script
 def load_ella(device, precision):
     global modelELLA
     global modelPath
@@ -898,6 +899,7 @@ def load_ella(device, precision):
         modelELLA = None
 
 
+# Load T5xl from conditioning helper script (loads in int4)
 def load_T5(device, precision):
     global modelT5
     global modelPath
@@ -921,6 +923,7 @@ def load_T5(device, precision):
         return False
 
 
+# Unload ELLA if needed
 def unload_ella(device):
     global modelELLA
     if "cuda" in device and modelELLA is not None:
@@ -931,6 +934,7 @@ def unload_ella(device):
             time.sleep(1)
 
 
+# Unload T5xl if needed
 def unload_T5(device, force=False):
     global modelT5
     cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
@@ -1759,6 +1763,7 @@ def generateLLMPrompts(prompts, negatives, seed, translate):
     return prompts, negatives
 
 
+# Warning messages for loras
 def manageModifiers(loras):
     for lora in loras:
         _, loraName = os.path.split(lora["file"])
@@ -2100,13 +2105,13 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
                 neg_text_embed_batch = []
                 ts = timestep(sigma)
                 for t5_clip_cond_pair in embed[run]:
-                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
+                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]*0.8), 1)
                     if uniform_conds:
                         text_embed = text_embed.repeat(condBatch, 1, 1)
                     text_embed_batch.append(text_embed)
 
                 for t5_clip_cond_pair in negative_embed[run]:
-                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
+                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]*0.8), 1)
                     if uniform_conds:
                         neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
                     neg_text_embed_batch.append(neg_text_embed)
@@ -2289,7 +2294,6 @@ def paletteGen(prompt, colors, seed, device, precision):
 
     # Perform k-centroid downscaling on the image
     image = decodeImage(image["value"]["images"][0])
-    image.save("test.png")
     image = kCentroid(image, int(image.width/(512/base)), 1, 2)
 
     # Iterate over the pixels in the image and set corresponding palette colors
@@ -2756,7 +2760,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                 cldm_uncond,
                 seed,
                 full_steps, # steps,
-                scale, # cfg,
+                scale + 2.0, # cfg,
                 "ddim", # sampler,
                 batch, # batch size
                 W,
