@@ -2600,6 +2600,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
 
     precision, model_precision, vae_precision = get_precision(device, precision)
+    precision_scope = autocast(device, precision, model_precision)
 
     with torch.no_grad():
         with precision_scope:
