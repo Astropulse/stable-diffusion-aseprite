@@ -235,9 +235,16 @@ FORCE_FP32 = False
 FORCE_FP16 = True
 if force_fp32:
     FORCE_FP32 = True
+    FORCE_FP16 = False
 
-if force_fp16:
+if force_fp16 and not force_fp32:
     FORCE_FP16 = True
+    FORCE_FP32 = False
+
+if cpu_state == CPUState.GPU:
+    if  torch.cuda.get_device_name("cuda").startswith("NVIDIA GeForce GTX 16"):
+        FORCE_FP32 = True
+        FORCE_FP16 = False
 
 if lowvram_available:
     try:
