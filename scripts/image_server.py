@@ -2602,104 +2602,105 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     precision, model_precision, vae_precision = get_precision(device, precision)
 
     with torch.no_grad():
-        base_count = 0
-        output = []
-
-        # Iterate over the specified number of iterations
-        for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
-            batch = min(batch, total_images - base_count)
-
-            for step, samples_ddim in enumerate(sample_cldm(
-                model_patcher,
-                cldm_cond,
-                cldm_uncond,
-                seed,
-                steps, # steps,
-                scale + 2.0, # cfg,
-                "ddim", # sampler,
-                batch, # batch size
-                W,
-                H,
-                image_embed[run], # initial latent for img2img
-                strength, # denoise strength
-                "kl_optimal" # scheduler
-            )):
-                if preview:
-                    message = [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
-                    # Render and send image previews
-                    if step % math.ceil(math.sqrt(W * H) / 448) == 0:
-                        displayOut = []
-                        for i in range(batch):
-                            x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
-                            name = str(seed+i)
-                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                        message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
-                    yield message
-            
-            for i in range(batch):
-                x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
-                if total_images > 1 and (base_count + 1) < total_images:
-                    play("iteration.wav")
-
-                seeds.append(str(seed))
-                name = [data[i], negative_data[i], translate, promptTuning, W, H, steps, scale, device, loras, pixelvae, seed]
-                if init_img is not None:
-                    name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
-                name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
-                output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
-
-                seed += 1
-                base_count += 1
-            # Delete the samples to free up memory
-            del samples_ddim
-
-        if mapColors and init_img is not None:
-            # Get cv2 format image for color matching
-            org_img = np.array(init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.BICUBIC))
-            org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
-
-            # Get palette for indexing
-            numColors = 256
-            palette_img = init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.NEAREST)
-            palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-            numColors = len(palette_img.getcolors(numColors))
-
-            # Extract palette colors
-            palette = np.concatenate([x[1] for x in palette_img.getcolors(numColors)]).tolist()
-
-            # Create a new palette image
-            tempPaletteImage = Image.new("P", (256, 1))
-            tempPaletteImage.putpalette(palette)
-
-            # Convert generated image to reduced input image palette
-            temp_output = output
+        with precision_scope:
+            base_count = 0
             output = []
-            for image in temp_output:
-                tempImage = image["image"]
-
-                # Match colors loosely
-                cv2_temp = cv2.cvtColor(np.array(tempImage), cv2.COLOR_RGB2BGR)
-                color_matched_img = match_color(cv2_temp, org_img)
-                image_indexed = Image.fromarray(cv2.cvtColor(color_matched_img, cv2.COLOR_BGR2RGB)).convert("RGB")
+    
+            # Iterate over the specified number of iterations
+            for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
+                batch = min(batch, total_images - base_count)
+    
+                for step, samples_ddim in enumerate(sample_cldm(
+                    model_patcher,
+                    cldm_cond,
+                    cldm_uncond,
+                    seed,
+                    steps, # steps,
+                    scale + 2.0, # cfg,
+                    "ddim", # sampler,
+                    batch, # batch size
+                    W,
+                    H,
+                    image_embed[run], # initial latent for img2img
+                    strength, # denoise strength
+                    "kl_optimal" # scheduler
+                )):
+                    if preview:
+                        message = [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
+                        # Render and send image previews
+                        if step % math.ceil(math.sqrt(W * H) / 448) == 0:
+                            displayOut = []
+                            for i in range(batch):
+                                x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
+                                name = str(seed+i)
+                                displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                            message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
+                        yield message
                 
-                # Index image to actual colors
-                image_indexed = image_indexed.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
-
-                if post:
-                    numColors = determine_best_k(image_indexed, 96)
-                    image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-
-                output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
-        elif post:
-            output = palettizeOutput(output)
-
-        final = []
-        for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
-        play("batch.wav")
-        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
-        unload_cldm()
-        yield ["", {"action": "display_image", "type": title, "value": {"images": final, "prompts": data, "negatives": negative_data}}]
+                for i in range(batch):
+                    x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
+                    if total_images > 1 and (base_count + 1) < total_images:
+                        play("iteration.wav")
+    
+                    seeds.append(str(seed))
+                    name = [data[i], negative_data[i], translate, promptTuning, W, H, steps, scale, device, loras, pixelvae, seed]
+                    if init_img is not None:
+                        name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
+                    name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
+                    output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+    
+                    seed += 1
+                    base_count += 1
+                # Delete the samples to free up memory
+                del samples_ddim
+    
+            if mapColors and init_img is not None:
+                # Get cv2 format image for color matching
+                org_img = np.array(init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.BICUBIC))
+                org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
+    
+                # Get palette for indexing
+                numColors = 256
+                palette_img = init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.NEAREST)
+                palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+                numColors = len(palette_img.getcolors(numColors))
+    
+                # Extract palette colors
+                palette = np.concatenate([x[1] for x in palette_img.getcolors(numColors)]).tolist()
+    
+                # Create a new palette image
+                tempPaletteImage = Image.new("P", (256, 1))
+                tempPaletteImage.putpalette(palette)
+    
+                # Convert generated image to reduced input image palette
+                temp_output = output
+                output = []
+                for image in temp_output:
+                    tempImage = image["image"]
+    
+                    # Match colors loosely
+                    cv2_temp = cv2.cvtColor(np.array(tempImage), cv2.COLOR_RGB2BGR)
+                    color_matched_img = match_color(cv2_temp, org_img)
+                    image_indexed = Image.fromarray(cv2.cvtColor(color_matched_img, cv2.COLOR_BGR2RGB)).convert("RGB")
+                    
+                    # Index image to actual colors
+                    image_indexed = image_indexed.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
+    
+                    if post:
+                        numColors = determine_best_k(image_indexed, 96)
+                        image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+    
+                    output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
+            elif post:
+                output = palettizeOutput(output)
+    
+            final = []
+            for image in output:
+                final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
+            play("batch.wav")
+            rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
+            unload_cldm()
+            yield ["", {"action": "display_image", "type": title, "value": {"images": final, "prompts": data, "negatives": negative_data}}]
 
 
 # Generate image from text prompt
