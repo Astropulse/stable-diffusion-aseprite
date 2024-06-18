@@ -18,7 +18,7 @@ highvram = False
 normalvram = False
 gpu_only = False
 force_fp32 = False
-force_fp16 = True
+force_fp16 = False
 disable_smart_memory = False
 disable_ipex_optimize = False
 bf16_vae = False
@@ -232,7 +232,7 @@ elif highvram or gpu_only:
     vram_state = VRAMState.HIGH_VRAM
 
 FORCE_FP32 = False
-FORCE_FP16 = True
+FORCE_FP16 = False
 if force_fp32:
     FORCE_FP32 = True
 
