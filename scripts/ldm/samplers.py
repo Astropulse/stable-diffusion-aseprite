@@ -5,6 +5,7 @@ import enum
 import math
 import ldm.utils
 import ldm.conds
+from ldm.util import rescale_noise_cfg
 
 
 # The main sampling function shared by all the samplers
@@ -305,7 +306,8 @@ def sampling_function(
         }
         return x - model_options["sampler_cfg_function"](args)
     else:
-        return uncond + (cond - uncond) * cond_scale
+        denoised = uncond + cond_scale * (cond - uncond)
+        return rescale_noise_cfg(denoised,cond)
 
 
 class CFGNoisePredictor(torch.nn.Module):

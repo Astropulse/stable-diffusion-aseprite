@@ -2884,7 +2884,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Adjust for size
     steps = min(40, round(steps * (1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
 
-    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 3))
+    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
         loras.append({"file": os.path.join(modelPath, "quality.lcm"), "weight": round(lcm_weight*10)})
@@ -3128,7 +3128,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     steps = round(3.4 + ((quality ** 2) / 1.6))
     # Adjust for size
     steps = min(40, round(steps * max(1, 1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
-    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 3))
+    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
         loras.append({"file": os.path.join(modelPath, "quality.lcm"), "weight": round(lcm_weight*10)})
