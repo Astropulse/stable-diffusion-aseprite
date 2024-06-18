@@ -263,7 +263,7 @@ def get_precision(device, precision):
         elif gpu_name.startswith("NVIDIA GeForce GTX 16") and torch.cuda.get_device_capability(device) == (7, 5):
             torch.backends.cudnn.benchmark = True
             # Check for FP16 support
-            if not gpu_name.startswith("NVIDIA GeForce GTX 1650"):
+            if not gpu_name.startswith("NVIDIA GeForce GTX 1650") or not gpu_name.startswith("NVIDIA GeForce GTX 1660"):
                 try:
                     _ = torch.ones(1, dtype=torch.float16).cuda()
                     precision = "fp16"
@@ -2105,13 +2105,13 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
                 neg_text_embed_batch = []
                 ts = timestep(sigma)
                 for t5_clip_cond_pair in embed[run]:
-                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]*0.8), 1)
+                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
                     if uniform_conds:
                         text_embed = text_embed.repeat(condBatch, 1, 1)
                     text_embed_batch.append(text_embed)
 
                 for t5_clip_cond_pair in negative_embed[run]:
-                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]*0.8), 1)
+                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
                     if uniform_conds:
                         neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
                     neg_text_embed_batch.append(neg_text_embed)
@@ -2668,58 +2668,58 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     precision_scope = autocast(device, precision, model_precision)
 
     with torch.no_grad():
-        base_count = 0
-        output = []
-        encoded_latent = []
+        with precision_scope:
+            base_count = 0
+            output = []
+            encoded_latent = []
 
-        # Iterate over the specified number of iterations
-        for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
-            batch = min(batch, total_images - base_count)
+            # Iterate over the specified number of iterations
+            for run in clbar(range(runs), name="Batches", position="last", unit="batch", prefixwidth=12, suffixwidth=28):
+                batch = min(batch, total_images - base_count)
 
-            if paletteImage is not None:
-                # Pre-generate with fixed settings
-                pre_embed = None
-                if image_embed[run] is not None:
-                    pre_embed = image_embed[run]
-                
-                pre_steps = steps
-                full_steps = round(steps * 0.6)
+                if paletteImage is not None:
+                    # Pre-generate with fixed settings
+                    pre_embed = None
+                    if image_embed[run] is not None:
+                        pre_embed = image_embed[run]
+                    
+                    pre_steps = steps
+                    full_steps = round(steps * 0.6)
 
-                for step, samples_ddim in enumerate(sample_cldm(
-                    model_patcher,
-                    cldm_cond,
-                    cldm_uncond,
-                    seed,
-                    pre_steps, # steps,
-                    scale + 2.0, # cfg,
-                    "euler", # sampler,
-                    1, # batch size
-                    W,
-                    H,
-                    pre_embed, # initial latent for img2img
-                    strength, # denoise strength
-                    "kl_optimal" # scheduler
-                )):
-                    if preview:
-                        message = [{"action": "display_title", "type": title, "value": {"text": f"Pre-generating... {step}/{pre_steps} steps in batch {run+1}/{runs}"}}]
-                        # Render and send image previews
-                        if step % math.ceil(math.sqrt(W * H) / 448) == 0:
-                            displayOut = []
-                            x_sample_image = fastRender(modelPV, samples_ddim[0:1], pixelSize, W, H)
-                            x_sample_image = convert_palette(x_sample_image, paletteImage, 0.5)
-                            name = str(seed)
-                            displayOut.append({"name": name, "seed": seed, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                            message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
-                        yield message
-                
-                strength = 0.75
-                
-                x_sample_image, _ = render(modelFS, modelTA, modelPV, samples_ddim[0:1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
-                x_sample_image = convert_palette(x_sample_image, paletteImage, 1.0)
-                x_sample_image = x_sample_image.resize((W, H), resample=Image.Resampling.NEAREST)
-                init_image = load_img(x_sample_image.convert("RGB"), H, W).to(device)
-                
-                with precision_scope:
+                    for step, samples_ddim in enumerate(sample_cldm(
+                        model_patcher,
+                        cldm_cond,
+                        cldm_uncond,
+                        seed,
+                        pre_steps, # steps,
+                        scale + 2.0, # cfg,
+                        "euler", # sampler,
+                        1, # batch size
+                        W,
+                        H,
+                        pre_embed, # initial latent for img2img
+                        strength, # denoise strength
+                        "kl_optimal" # scheduler
+                    )):
+                        if preview:
+                            message = [{"action": "display_title", "type": title, "value": {"text": f"Pre-generating... {step}/{pre_steps} steps in batch {run+1}/{runs}"}}]
+                            # Render and send image previews
+                            if step % math.ceil(math.sqrt(W * H) / 448) == 0:
+                                displayOut = []
+                                x_sample_image = fastRender(modelPV, samples_ddim[0:1], pixelSize, W, H)
+                                x_sample_image = convert_palette(x_sample_image, paletteImage, 0.5)
+                                name = str(seed)
+                                displayOut.append({"name": name, "seed": seed, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                                message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
+                            yield message
+                    
+                    strength = 0.75
+                    
+                    x_sample_image, _ = render(modelFS, modelTA, modelPV, samples_ddim[0:1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
+                    x_sample_image = convert_palette(x_sample_image, paletteImage, 1.0)
+                    x_sample_image = x_sample_image.resize((W, H), resample=Image.Resampling.NEAREST)
+                    init_image = load_img(x_sample_image.convert("RGB"), H, W).to(device)
+                    
                     latentBatch = batch
                     latentCount = 0
 
@@ -2739,116 +2739,116 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     # Encode the scaled latent
                     encoded_latent.append(init_latent_base)
                     latentCount += latentBatch
-                    
+                        
+                    # Delete the samples to free up memory
+                    del samples_ddim
+
+                    # Add lcm
+                    raw_loras.append({"sd": load_lora_raw(os.path.join(modelPath, "quality.lcm")), "weight": 30})
+
+                    # Add composition controlnet
+                    netPath = os.path.join(modelPath, "CONTROLNET")
+                    controlnets.append({"model_file": os.path.join(netPath, "Composition.safetensors"), "image": x_sample_image, "weight": 0.8})
+                    model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
+                else:
+                    encoded_latent = image_embed
+                    full_steps = steps
+
+                for step, samples_ddim in enumerate(sample_cldm(
+                    model_patcher,
+                    cldm_cond,
+                    cldm_uncond,
+                    seed,
+                    full_steps, # steps,
+                    scale + 2.0, # cfg,
+                    "ddim", # sampler,
+                    batch, # batch size
+                    W,
+                    H,
+                    encoded_latent[run], # initial latent for img2img
+                    strength, # denoise strength
+                    "kl_optimal" # scheduler
+                )):
+                    if preview:
+                        message = [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
+                        # Render and send image previews
+                        if step % math.ceil(math.sqrt(W * H) / 448) == 0:
+                            displayOut = []
+                            for i in range(batch):
+                                x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
+                                if paletteImage is not None:
+                                    x_sample_image = convert_palette(x_sample_image, paletteImage, step/steps)
+                                name = str(seed+i)
+                                displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+                            message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
+                        yield message
+                
+                for i in range(batch):
+                    x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
+                    if paletteImage is not None:
+                        x_sample_image = convert_palette(x_sample_image, paletteImage)
+                    if total_images > 1 and (base_count + 1) < total_images:
+                        play("iteration.wav")
+
+                    seeds.append(str(seed))
+                    name = [data[i], negative_data[i], translate, promptTuning, W, H, steps, scale, device, loras, pixelvae, seed]
+                    if init_img is not None:
+                        name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
+                    name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
+                    output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+
+                    seed += 1
+                    base_count += 1
                 # Delete the samples to free up memory
                 del samples_ddim
 
-                # Add lcm
-                raw_loras.append({"sd": load_lora_raw(os.path.join(modelPath, "quality.lcm")), "weight": 30})
+            if mapColors and init_img is not None:
+                # Get cv2 format image for color matching
+                org_img = np.array(init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.BICUBIC))
+                org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
 
-                # Add composition controlnet
-                netPath = os.path.join(modelPath, "CONTROLNET")
-                controlnets.append({"model_file": os.path.join(netPath, "Composition.safetensors"), "image": x_sample_image, "weight": 0.8})
-                model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
-            else:
-                encoded_latent = image_embed
-                full_steps = steps
+                # Get palette for indexing
+                numColors = 256
+                palette_img = init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.NEAREST)
+                palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+                numColors = len(palette_img.getcolors(numColors))
 
-            for step, samples_ddim in enumerate(sample_cldm(
-                model_patcher,
-                cldm_cond,
-                cldm_uncond,
-                seed,
-                full_steps, # steps,
-                scale + 2.0, # cfg,
-                "ddim", # sampler,
-                batch, # batch size
-                W,
-                H,
-                encoded_latent[run], # initial latent for img2img
-                strength, # denoise strength
-                "kl_optimal" # scheduler
-            )):
-                if preview:
-                    message = [{"action": "display_title", "type": title, "value": {"text": f"Generating... {step}/{steps} steps in batch {run+1}/{runs}"}}]
-                    # Render and send image previews
-                    if step % math.ceil(math.sqrt(W * H) / 448) == 0:
-                        displayOut = []
-                        for i in range(batch):
-                            x_sample_image = fastRender(modelPV, samples_ddim[i:i+1], pixelSize, W, H)
-                            if paletteImage is not None:
-                                x_sample_image = convert_palette(x_sample_image, paletteImage, step/steps)
-                            name = str(seed+i)
-                            displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
-                        message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
-                    yield message
-            
-            for i in range(batch):
-                x_sample_image, post = render(modelFS, modelTA, modelPV, samples_ddim[i:i+1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
-                if paletteImage is not None:
-                    x_sample_image = convert_palette(x_sample_image, paletteImage)
-                if total_images > 1 and (base_count + 1) < total_images:
-                    play("iteration.wav")
+                # Extract palette colors
+                palette = np.concatenate([x[1] for x in palette_img.getcolors(numColors)]).tolist()
 
-                seeds.append(str(seed))
-                name = [data[i], negative_data[i], translate, promptTuning, W, H, steps, scale, device, loras, pixelvae, seed]
-                if init_img is not None:
-                    name.append(init_img.resize((16, 16), resample=Image.Resampling.NEAREST))
-                name = str(hash(str(name)) & 0x7FFFFFFFFFFFFFFF)
-                output.append({"name": name, "seed": seed, "format": "bytes", "image": x_sample_image, "width": x_sample_image.width, "height": x_sample_image.height})
+                # Create a new palette image
+                tempPaletteImage = Image.new("P", (256, 1))
+                tempPaletteImage.putpalette(palette)
 
-                seed += 1
-                base_count += 1
-            # Delete the samples to free up memory
-            del samples_ddim
+                # Convert generated image to reduced input image palette
+                temp_output = output
+                output = []
+                for image in temp_output:
+                    tempImage = image["image"]
 
-        if mapColors and init_img is not None:
-            # Get cv2 format image for color matching
-            org_img = np.array(init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.BICUBIC))
-            org_img = cv2.cvtColor(org_img, cv2.COLOR_RGB2BGR)
+                    # Match colors loosely
+                    cv2_temp = cv2.cvtColor(np.array(tempImage), cv2.COLOR_RGB2BGR)
+                    color_matched_img = match_color(cv2_temp, org_img)
+                    image_indexed = Image.fromarray(cv2.cvtColor(color_matched_img, cv2.COLOR_BGR2RGB)).convert("RGB")
+                    
+                    # Index image to actual colors
+                    image_indexed = image_indexed.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
 
-            # Get palette for indexing
-            numColors = 256
-            palette_img = init_img.resize((W // pixelSize, H // pixelSize), resample=Image.Resampling.NEAREST)
-            palette_img = palette_img.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-            numColors = len(palette_img.getcolors(numColors))
+                    if post:
+                        numColors = determine_best_k(image_indexed, 96)
+                        image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
 
-            # Extract palette colors
-            palette = np.concatenate([x[1] for x in palette_img.getcolors(numColors)]).tolist()
+                    output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
+            elif post and paletteImage is None:
+                output = palettizeOutput(output)
 
-            # Create a new palette image
-            tempPaletteImage = Image.new("P", (256, 1))
-            tempPaletteImage.putpalette(palette)
-
-            # Convert generated image to reduced input image palette
-            temp_output = output
-            output = []
-            for image in temp_output:
-                tempImage = image["image"]
-
-                # Match colors loosely
-                cv2_temp = cv2.cvtColor(np.array(tempImage), cv2.COLOR_RGB2BGR)
-                color_matched_img = match_color(cv2_temp, org_img)
-                image_indexed = Image.fromarray(cv2.cvtColor(color_matched_img, cv2.COLOR_BGR2RGB)).convert("RGB")
-                
-                # Index image to actual colors
-                image_indexed = image_indexed.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
-
-                if post:
-                    numColors = determine_best_k(image_indexed, 96)
-                    image_indexed = image_indexed.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-
-                output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
-        elif post and paletteImage is None:
-            output = palettizeOutput(output)
-
-        final = []
-        for image in output:
-            final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
-        play("batch.wav")
-        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
-        unload_cldm()
-        yield ["", {"action": "display_image", "type": title, "value": {"images": final, "prompts": data, "negatives": negative_data}}]
+            final = []
+            for image in output:
+                final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
+            play("batch.wav")
+            rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[#48a971]Seeds: [#494b9b]{', '.join(seeds)}")
+            unload_cldm()
+            yield ["", {"action": "display_image", "type": title, "value": {"images": final, "prompts": data, "negatives": negative_data}}]
 
 
 # Generate image from text prompt
@@ -2884,7 +2884,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Adjust for size
     steps = min(40, round(steps * (1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
 
-    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
+    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 3))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
         loras.append({"file": os.path.join(modelPath, "quality.lcm"), "weight": round(lcm_weight*10)})
@@ -3128,7 +3128,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     steps = round(3.4 + ((quality ** 2) / 1.6))
     # Adjust for size
     steps = min(40, round(steps * max(1, 1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
-    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
+    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 3))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
         loras.append({"file": os.path.join(modelPath, "quality.lcm"), "weight": round(lcm_weight*10)})
