@@ -75,8 +75,25 @@ def load_controlnet(
         )
 
     # Compute conditioning
-    cldm_conditioning = [[conditioning[0][0], {"pooled_output": None}]]
-    cldm_negative_conditioning = [[negative_conditioning[0][0], {"pooled_output": None}]]
+    if len(conditioning[0]) > 1:
+        cldm_conditioning = []
+        cldm_negative_conditioning = []
+
+        total_values = len(conditioning[0])
+        increments = 1 / total_values
+
+        for step, embed in enumerate(conditioning[0]):
+            start_percent = (step) * increments
+            end_percent = start_percent + increments
+            cldm_conditioning.append([embed, {'start_percent': start_percent, 'end_percent': end_percent}])
+
+        for step, embed in enumerate(negative_conditioning[0]):
+            start_percent = (step) * increments
+            end_percent = start_percent + increments
+            cldm_negative_conditioning.append([embed, {'start_percent': start_percent, 'end_percent': end_percent}])
+    else:
+        cldm_conditioning = [[conditioning[0][0], {"pooled_output": None}]]
+        cldm_negative_conditioning = [[negative_conditioning[0][0], {"pooled_output": None}]]
 
     for controlnet_input in controlnets:
         # Load controlnet model
