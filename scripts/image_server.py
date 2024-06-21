@@ -94,6 +94,17 @@ except:
     input("Catastrophic failure, send this error to the developer.\nPress any key to exit.")
     exit()
 
+
+# Print system info
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name('cuda')}")
+    print(f"VRAM total: {torch.cuda.get_device_properties('cuda').total_memory / (1024 ** 3)}")
+else:
+    print("No GPU could be found")
+
+print(f"RAM available {psutil.virtual_memory().available / (1024 ** 3)}")
+
+
 # Global variables
 global modelName
 modelName = None
@@ -2082,7 +2093,7 @@ def get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device,
 
 
 # Generate the text embeddings for prompts
-def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision):
+def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision, adherence):
     # Create conditioning values for each batch, then unload the text encoder
     negative_conditioning = []
     conditioning = []
@@ -2092,6 +2103,9 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
         # Use the specified precision scope
         load_ella(device, precision)
         sigmas = get_sigmas_ays(steps)
+        clip_weight = math.sqrt(-1 * (adherence-5)) / 2
+
+        print(clip_weight)
         condBatch = batch
         condCount = 0
         for run in range(runs):
@@ -2105,13 +2119,13 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
                 neg_text_embed_batch = []
                 ts = timestep(sigma)
                 for t5_clip_cond_pair in embed[run]:
-                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
+                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1] * clip_weight), 1)
                     if uniform_conds:
                         text_embed = text_embed.repeat(condBatch, 1, 1)
                     text_embed_batch.append(text_embed)
 
                 for t5_clip_cond_pair in negative_embed[run]:
-                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1]), 1)
+                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1] * clip_weight), 1)
                     if uniform_conds:
                         neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
                     neg_text_embed_batch.append(neg_text_embed)
@@ -2289,7 +2303,7 @@ def paletteGen(prompt, colors, seed, device, precision):
     width = 512+((512/base)*(colors-base))
 
     # Generate text-to-image conversion with specified parameters
-    for _ in txt2img(prompt, "", False, False, False, int(width), 512, 1, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
+    for _ in txt2img(prompt, "", False, 1, False, False, int(width), 512, 1, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
         image = _[1]
 
     # Perform k-centroid downscaling on the image
@@ -2386,7 +2400,7 @@ def manageComposition(lighting, composition, loras):
 
 
 # Prepare variables for controlnet inference
-def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
+def prepare_inference(title, prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, image = None):
     raw_loras = []
     
     # Check gpu availability
@@ -2557,7 +2571,7 @@ def prepare_inference(title, prompt, negative, use_ella, translate, promptTuning
                     t5_device = "cpu"
             if use_ella and cardMemory >= 4:
                 t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device, device, precision)
-                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision, adherence)
             else:
                 if use_ella:
                     rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 4GB of VRAM or unused RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
@@ -2617,7 +2631,7 @@ def convert_palette(image, paletteImage, weight = 1.0):
 
 
 # Run controlnet inference
-def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None, paletteImage = None):
+def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, adherence, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None, paletteImage = None):
     timer = time.time()
     global modelCS
     global modelFS
@@ -2652,7 +2666,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
             prompt = remove_repeated_words(processor.decode(model.generate(**inputs, max_new_tokens=30)[0], skip_special_tokens=True))
             rprint(f"[#48a971]Caption: [#494b9b]{prompt}")
     
-    conditioning, negative_conditioning, image_embed, steps, scale, runs, data, negative_data, seeds, batch, raw_loras = prepare_inference(title, prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, init_img)
+    conditioning, negative_conditioning, image_embed, steps, scale, runs, data, negative_data, seeds, batch, raw_loras = prepare_inference(title, prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, steps, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, init_img)
 
     title = title.lower().replace(' ', '_')
 
@@ -2692,7 +2706,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                         cldm_uncond,
                         seed,
                         pre_steps, # steps,
-                        scale + 2.0, # cfg,
+                        scale + 3.0, # cfg,
                         "euler", # sampler,
                         1, # batch size
                         W,
@@ -2760,7 +2774,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     cldm_uncond,
                     seed,
                     full_steps, # steps,
-                    scale + 2.0, # cfg,
+                    scale + 3.0, # cfg,
                     "ddim", # sampler,
                     batch, # batch size
                     W,
@@ -2852,7 +2866,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
 
 
 # Generate image from text prompt
-def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
+def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
     
     # Check gpu availability
@@ -2884,7 +2898,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     # Adjust for size
     steps = min(40, round(steps * (1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
 
-    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
+    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 4))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
         loras.append({"file": os.path.join(modelPath, "quality.lcm"), "weight": round(lcm_weight*10)})
@@ -3007,7 +3021,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                     t5_device = "cpu"
             if use_ella and cardMemory >= 4:
                 t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device, device, precision)
-                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision, adherence)
             else:
                 if use_ella:
                     rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 4GB of VRAM or unused RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
@@ -3086,7 +3100,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
 
 # Generate image from image+text prompt
-def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize, quality, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, images, tilingX, tilingY, preview, pixelvae, post):
+def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, quality, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, images, tilingX, tilingY, preview, pixelvae, post):
     timer = time.time()
 
     # Check gpu availability
@@ -3128,7 +3142,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
     steps = round(3.4 + ((quality ** 2) / 1.6))
     # Adjust for size
     steps = min(40, round(steps * max(1, 1 + ((((size - 320) / 320) - 1) / 5) ** 2)))
-    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 5))
+    scale = max(1, scale * ((1.6 + (((quality - 1.6) ** 2) / 4)) / 4))
     lcm_weight = max(1.5, 10 - (quality * 1.5))
     if lcm_weight > 0:
         loras.append({"file": os.path.join(modelPath, "quality.lcm"), "weight": round(lcm_weight*10)})
@@ -3274,7 +3288,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
                     t5_device = "cpu"
             if use_ella and cardMemory >= 4:
                 t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device, device, precision)
-                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision)
+                conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, W // 8, H // 8, device, precision, adherence)
             else:
                 if use_ella:
                     rprint(f'[#ab333d]T5 text encoder cannot be loaded. At least 4GB of VRAM or unused RAM is required.\nDisable "Strong text guidance" in image style settings to hide this warning.')
@@ -3574,6 +3588,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 False,
                                 values["translate"],
                                 values["prompt_tuning"],
@@ -3667,6 +3682,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 values["blip"],
                                 False,
                                 values["prompt_tuning"],
@@ -3757,6 +3773,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 values["blip"],
                                 False,
                                 values["prompt_tuning"],
@@ -3845,6 +3862,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 values["blip"],
                                 False,
                                 values["prompt_tuning"],
@@ -3909,6 +3927,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 values["translate"],
                                 values["prompt_tuning"],
                                 values["width"],
@@ -4027,6 +4046,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 False,
                                 values["translate"],
                                 values["prompt_tuning"],
@@ -4092,6 +4112,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 values["translate"],
                                 values["prompt_tuning"],
                                 values["width"],
@@ -4212,6 +4233,7 @@ async def server(websocket):
                                 values["prompt"],
                                 values["negative"],
                                 values["use_ella"],
+                                values["adherence"],
                                 False,
                                 values["translate"],
                                 values["prompt_tuning"],
@@ -4444,7 +4466,7 @@ async def server(websocket):
             except:
                 pass
     except Exception as e:
-        if "asyncio.exceptions.IncompleteReadError" in traceback.format_exc():
+        if "asyncio.exceptions.IncompleteReadError" in traceback.format_exc() or "ensure_open" in traceback.format_exc():
             rprint(f"\n[#ab333d]Bytes read error (resolved automatically)")
         else:
             if "PayloadTooBig" in traceback.format_exc() or "message too big" in traceback.format_exc():
