@@ -2105,7 +2105,6 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
         sigmas = get_sigmas_ays(steps)
         clip_weight = math.sqrt(-1 * (adherence-5)) / 2
 
-        print(clip_weight)
         condBatch = batch
         condCount = 0
         for run in range(runs):
