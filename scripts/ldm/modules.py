@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from torch.nn import MultiheadAttention
 from torch.nn.functional import silu
 from transformers import CLIPTextModel, CLIPTokenizer
+import traceback
 
 from .util import (
     avg_pool_nd,
@@ -878,20 +879,26 @@ class BasicTransformerBlock(nn.Module):
                 self.get_window_args(x, original_shape, shift) if x is not None else None
                 for x in (q, k, v)
             )
-            if q is not None and q is k and q is v:
-                q, k, v = (
-                    self.window_partition(
-                        q,
-                        *window_args[0],
-                    ),
-                ) * 3
-            else:
-                q, k, v = tuple(
-                    self.window_partition(x, *window_args[idx])
-                    if x is not None
-                    else None
-                    for idx, x in enumerate((q, k, v))
-                )
+            try:
+                if q is not None and q is k and q is v:
+                    q, k, v = (
+                        self.window_partition(
+                            q,
+                            *window_args[0],
+                        ),
+                    ) * 3
+                else:
+                    q, k, v = tuple(
+                        self.window_partition(x, *window_args[idx])
+                        if x is not None
+                        else None
+                        for idx, x in enumerate((q, k, v))
+                    )
+            except:
+                if "invalid for input of size" in traceback.format_exc():
+                    q = k = v = n
+                else:
+                    raise
                 
         
         # HyperTile
@@ -912,14 +919,22 @@ class BasicTransformerBlock(nn.Module):
         m = ToDo(q, l1_depth, l2_depth, original_shape)
         k, v = m(k), m(v)
         
-        n = self.attn1(q, context=k, value=v)
+        temp_n = self.attn1(q, context=k, value=v)
         
         
         if window_args is not None and last_block == transformer_options.get("block") and use_mswmsa:
-            args, window_args = window_args[0], None
-            n = self.window_reverse(n, *args)
+            try:
+                args, window_args = window_args[0], None
+                n = self.window_reverse(temp_n, *args)
+            except:
+                if "invalid for input of size" in traceback.format_exc():
+                    window_args = None
+                    n = temp_n
+                else:
+                    raise
         else:
             window_args = None
+            n = temp_n
         
 
         if qn == h * w and hyperTile:
