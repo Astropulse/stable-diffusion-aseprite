@@ -122,7 +122,7 @@ def load_controlnet(
         ra_range = (1.0, 0.0)
 
     # Cross Attention blocks
-    percent_end = ((((size - 124) / 8) / 2.2) ** 0.33) / 10
+    percent_end = ((((size - 124) / 8) / 5) ** 0.5) / 10
     ca_use_blocks = ("3", "6") # empty for low, 3 for 320x240
     if size >= 160 and use_hidiff:
         ca_range = (0.0, percent_end) # (1.0, 0.0) for < 112x112 - (0.0, 0.05) for 128x128 - (0.0, 0.15) for 192x192 - (0.0, 0.2) for 320x240

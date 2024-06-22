@@ -758,7 +758,7 @@ class UNet(DDPM):
             transformer_options["ra_range"] = (1.0, 0.0)
 
         # Cross Attention blocks
-        percent_end = ((((size - 124) / 8) / 2.2) ** 0.33) / 10
+        percent_end = ((((size - 124) / 8) / 5) ** 0.5) / 10
         ca_use_blocks = parse_blocks("input", "3") # empty for low, 3 for 320x240
         ca_use_blocks |= parse_blocks("output", "6") # empty for low, 6 for 320x240
         transformer_options["ca_use_blocks"] = ca_use_blocks
