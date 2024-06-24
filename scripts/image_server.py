@@ -184,7 +184,8 @@ def clearCache():
             torch.mps.empty_cache()
         except:
             pass
-    torch.cuda.ipc_collect()
+    else:
+        torch.cuda.ipc_collect()
 
 
 def oom_error(traceback):
@@ -2118,13 +2119,19 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
                 neg_text_embed_batch = []
                 ts = timestep(sigma)
                 for t5_clip_cond_pair in embed[run]:
-                    text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1] * clip_weight), 1)
+                    if clip_weight > 0.0:
+                        text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1] * clip_weight), 1)
+                    else:
+                        text_embed = modelELLA(ts, t5_clip_cond_pair[0])
                     if uniform_conds:
                         text_embed = text_embed.repeat(condBatch, 1, 1)
                     text_embed_batch.append(text_embed)
 
                 for t5_clip_cond_pair in negative_embed[run]:
-                    neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1] * clip_weight), 1)
+                    if clip_weight > 0.0:
+                        neg_text_embed = torch.cat((modelELLA(ts, t5_clip_cond_pair[0]), t5_clip_cond_pair[1] * clip_weight), 1)
+                    else:
+                        neg_text_embed = modelELLA(ts, t5_clip_cond_pair[0])
                     if uniform_conds:
                         neg_text_embed = neg_text_embed.repeat(condBatch, 1, 1)
                     neg_text_embed_batch.append(neg_text_embed)
