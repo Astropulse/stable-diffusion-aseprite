@@ -185,7 +185,10 @@ def clearCache():
         except:
             pass
     else:
-        torch.cuda.ipc_collect()
+        try:
+            torch.cuda.ipc_collect()
+        except:
+            pass
 
 
 def oom_error(traceback):
@@ -2258,12 +2261,6 @@ def render(modelFS, modelTA, modelPV, samples_ddim, device, precision, H, W, pix
         x_sample_image = kCentroid(x_sample_image, W // pixelSize, H // pixelSize, 2)
     elif x_sample_image.width < W // pixelSize and x_sample_image.height < H // pixelSize:
         x_sample_image = x_sample_image.resize((W, H), resample=Image.Resampling.NEAREST)
-
-    if not pixelvae and False:
-        # Sharpen to enhance details lost by decoding
-        x_sample_image_sharp = x_sample_image.filter(ImageFilter.SHARPEN)
-        alpha = 0.13
-        x_sample_image = Image.blend(x_sample_image, x_sample_image_sharp, alpha)
 
     loraNames = [os.path.split(d["file"])[1] for d in loras if "file" in d]
     if "1bit.pxlm" in loraNames:
