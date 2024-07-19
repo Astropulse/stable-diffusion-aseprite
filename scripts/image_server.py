@@ -30,6 +30,7 @@ try:
         load_lora_raw,
         register_lora_for_inference,
         remove_lora_for_inference,
+        lora_unload
     )
     from conditioning.model import ELLA, T5TextEmbedder
     from ddpm import get_sigmas_ays
@@ -37,6 +38,7 @@ try:
     from oe_utils import outline_expansion, match_color
     import segmenter
     import preprocessors.pose_util as pose_util
+    from preprocessors.pbr_texture_util import generate_pbr
     import hitherdither
 
     # Import PyTorch functions
@@ -171,8 +173,9 @@ if False:
     torch.cuda.set_per_process_memory_fraction(fractionalMaxMemory)
 
 global timeout
-global loaded
-loaded = ""
+
+global kill_process
+kill_process = False
 
 
 # Clears pytorch and mps cache
@@ -995,6 +998,9 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
     global modelName
     global modelSettings
 
+    global kill_process
+    kill_process = False
+
     modelParams = {"file": modelFileString, "device": device, "precision": precision, "optimized": optimized, "split": split}
     if modelSettings != modelParams:
         timer = time.time()
@@ -1794,10 +1800,14 @@ def manageModifiers(loras):
                     rprint(f'[#ab333d]Maximum recommended strength for "Top-down" modifier is 90%. Higher values may cause unpredictable results.')
                 elif loraName == "gameicons" and lora["weight"] > 60:
                     rprint(f'[#ab333d]Maximum recommended strength for "Game Items" modifier is 60%. Higher values may cause unpredictable results.')
+                elif loraName == "uipanel" and lora["weight"] < 60:
+                    rprint(f'[#ab333d]Minimum recommended strength for "UI Panel" modifier is 60%. Lower values may cause unpredictable results.')
                 elif loraName == "isometric" and lora["weight"] > 60:
                     rprint(f'[#ab333d]Maximum recommended strength for "Isometric" modifier is 60%. Higher values may cause unpredictable results.')
                 elif loraName == "frontfacing" and lora["weight"] > 65:
                     rprint(f'[#ab333d]Maximum recommended strength for "Front-facing" modifier is 65%. Higher values may cause unpredictable results.')
+                elif loraName == "simplegeometric" and (lora["weight"] < 50 or lora["weight"] > 80):
+                    rprint(f'[#ab333d]Recommended strength for "Simple Geometric" modifier is 50-80%. Higher or lower values may cause unpredictable results.')
     
     return loras
 
@@ -1818,13 +1828,19 @@ def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
             # Defaults
             prefix = "pixel, pixel art"
             suffix = ""
-            negativeList = [negative, "frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
+            if negative == "":
+                negativeList = ["frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
+            else:
+                negativeList = [negative, "frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
 
             # Lora specific modifications
             if any(f"{_}.pxlm" in loraNames for _ in [
                 "topdown",
                 "isometric",
+                "frontfacing",
+                "gameicons",
                 "modern",
+                "flatshading",
                 "neogeo",
                 "nes",
                 "snes",
@@ -1835,11 +1851,11 @@ def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
             ]):
                 prefix = "pixel, pixel art"
                 suffix = ""
-            elif any(f"{_}.pxlm" in loraNames for _ in ["frontfacing", "gameicons", "flatshading"]):
+            elif any(f"{_}.pxlm" in loraNames for _ in ["simplegeometric"]):
                 prefix = "pixel, pixel art"
-                suffix = ""
+                suffix = "outlines"
             elif any(f"{_}.pxlm" in loraNames for _ in ["nashorkimitems"]):
-                prefix = "pixel art, pixel, item"
+                prefix = "pixel art style, pixel, item"
                 suffix = ""
                 negativeList.insert(0, "vibrant, colorful")
             elif any(f"{_}.pxlm" in loraNames for _ in ["gamecharacters", "gamecharactersretro"]):
@@ -1853,6 +1869,10 @@ def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
                 prefix = f"{prefix}, 1-bit"
                 suffix = f"{suffix}, black and white, white background"
                 negativeList.insert(0, "color, colors")
+
+            if any(f"{_}.pxlm" in loraNames for _ in ["uipanel"]):
+                prefix = f"{prefix}, ui panel"
+                suffix = f"with a blank background, {suffix}"
 
             if any(f"{_}.pxlm" in loraNames for _ in ["tiling", "tiling16", "tiling32"]):
                 prefix = f"{prefix}, texture"
@@ -1881,15 +1901,18 @@ def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
                     suffix = f"{suffix}, Game Boy Advance video game style"
 
             # Combine all prompt modifications
-            out_prompts.append(f"{prefix}, {prompt}, {suffix}")
+            if suffix == "":
+                out_prompts.append(", ".join([prefix, prompt]))
+            else:
+                out_prompts.append(", ".join([prefix, prompt, suffix]))
             out_negatives.append(", ".join(negativeList))
         else:
             if promptTuning:
                 out_prompts.append(prompt)
-                out_negatives.append(f"{negative}, pixel art, blurry, mutated, deformed, borders, watermark, text")
+                out_negatives.append(", ".join([negative, "pixel art, blurry, mutated, deformed, borders, watermark, text"]))
             else:
                 out_prompts.append(prompt)
-                out_negatives.append(f"{negative}, pixel art")
+                out_negatives.append(", ".join([negative, "pixel art"]))
 
     del loraNames
     return out_prompts, out_negatives
@@ -2910,9 +2933,6 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
     gWidth = W // 8
     gHeight = H // 8
 
-    if math.sqrt(gWidth * gHeight) < 24:
-        use_ella = False
-
     # Composition and lighting modifications
     loras = manageComposition(lighting, composition, loras)
 
@@ -2992,11 +3012,11 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
             loadedLoras[i].multiplier = loraPair["weight"] / 100
             # Prepare for inference
             register_lora_for_inference(loadedLoras[i])
-            apply_lora()
             if not any(name == os.path.splitext(loraName)[0] for name in system_models):
                 rprint(f"[#494b9b]Using [#48a971]{os.path.splitext(loraName)[0]} [#494b9b]LoRA with [#48a971]{loraPair['weight']}% [#494b9b]strength")
         else:
             loadedLoras.append(None)
+    apply_lora()
 
     # Manage modifiers
     loras = manageModifiers(loras)
@@ -3023,6 +3043,8 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
                 else:
                     t5_device = "cpu"
             if use_ella and cardMemory >= 4:
+                if pixelSize == 16:
+                    rprint(f'[#ab333d]Using "Strong text guidance" at small sizes may cause some prompts to fail, especially for objects and tools.\nIf you encounter strange results try disabling strong text guidance.')
                 t5_clip_embed, t5_clip_neg_embed, uniform_conds = get_text_embed_t5(data, negative_data, runs, batch, total_images, t5_device, device, precision)
                 conditioning, negative_conditioning, shape = t5_to_clip(t5_clip_embed, t5_clip_neg_embed, uniform_conds, steps, runs, batch, total_images, gWidth, gHeight, device, precision, adherence)
             else:
@@ -3228,11 +3250,11 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
             loadedLoras[i].multiplier = loraPair["weight"] / 100
             # Prepare for inference
             register_lora_for_inference(loadedLoras[i])
-            apply_lora()
             if not any(name == os.path.splitext(loraName)[0] for name in system_models):
                 rprint(f"[#494b9b]Using [#48a971]{os.path.splitext(loraName)[0]} [#494b9b]LoRA with [#48a971]{loraPair['weight']}% [#494b9b]strength")
         else:
             loadedLoras.append(None)
+    apply_lora()
 
     # Manage modifiers
     loras = manageModifiers(loras)
@@ -3400,6 +3422,36 @@ def prompt2prompt(path, prompt, negative, generations, seed):
     return prompts
 
 
+def generateTextureMaps(images, modelPath, ops):
+    timer = time.time()
+    pbrModelPath = os.path.join(modelPath, "PREPROCESSOR")
+
+    rprint(f"\n[#48a971]Extracting [#48a971]{len(images)}[white] texture material maps")
+
+    for i, image in enumerate(images):
+        images[i] = decodeImage(image)
+    
+    normal_maps, roughness_maps, displacement_maps = generate_pbr(pbrModelPath, images, ops)
+
+    for i, image in enumerate(normal_maps):
+        name = str(hash(str([i, image])))
+        normal_maps[i] = {"name": name, "format": "bytes", "image": encodeImage(image, "bytes"), "width": image.width, "height": image.height}
+
+    for i, image in enumerate(roughness_maps):
+        name = str(hash(str([i, image])))
+        roughness_maps[i] = {"name": name, "format": "bytes", "image": encodeImage(image, "bytes"), "width": image.width, "height": image.height}
+
+    for i, image in enumerate(displacement_maps):
+        name = str(hash(str([i, image])))
+        displacement_maps[i] = {"name": name, "format": "bytes", "image": encodeImage(image, "bytes"), "width": image.width, "height": image.height}
+
+    
+    play("batch.wav")
+    rprint(f"[#c4f129]Generated [#48a971]{len(images)}[#c4f129] texture material maps in [#48a971]{round(time.time()-timer, 2)}[#c4f129] seconds")
+
+    return {"normal_maps": normal_maps, "roughness_maps": roughness_maps, "depth_maps": displacement_maps}
+
+
 # Test largest image generation possible
 def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, seed):
     timer = time.time()
@@ -3535,6 +3587,7 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
 
 async def server(websocket):
     background = False
+    global kill_process
     try:
         assert sys.version_info >= (3, 10)
         async for message in websocket:
@@ -3619,6 +3672,18 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                unload_cldm()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3713,6 +3778,18 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                unload_cldm()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3804,6 +3881,18 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                unload_cldm()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3893,6 +3982,18 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                unload_cldm()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -3956,6 +4057,17 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": "txt2img", "value": {"text": "Generation complete"}}))
@@ -4077,6 +4189,18 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                unload_cldm()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -4143,6 +4267,17 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generation complete"}}))
@@ -4265,6 +4400,18 @@ async def server(websocket):
                                     await websocket.send(json.dumps(result[0]))
                                     if len(result) >= 2:
                                         await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                unload_cldm()
+                                clearCache()
+                                kill_process = False
+                                break
 
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": title.lower().replace(' ', '_'), "value": {"text": "Generation complete"}}))
@@ -4391,6 +4538,16 @@ async def server(websocket):
                             rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
                             await websocket.send(json.dumps({"action": "error"}))
+                    case "textureGen":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+                            textureMaps = generateTextureMaps(values["images"], values["model_folder"], values["ops"])
+                            await websocket.send(json.dumps({"action": "returning", "type": "textureGen", "value": textureMaps}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
                     case "pixelDetect":
                         try:
                             # Extract parameters from the message
@@ -4448,6 +4605,7 @@ async def server(websocket):
                         else:
                             rprint(f"\n[#ab333d]The current client is on a version that is incompatible with the image generator version. Please update the extension.")
                     case "recieved":
+                        kill_process = False
                         if not background:
                             try:
                                 rd = gw.getWindowsWithTitle("Retro Diffusion Image Generator")[0]
@@ -4459,6 +4617,9 @@ async def server(websocket):
                                 pass
                         await websocket.send(json.dumps({"action": "free_websocket"}))
                         clearCache()
+                    case "cancel":
+                        kill_process = True
+                        await websocket.send(json.dumps({"action": "cancel"}))
                     case "shutdown":
                         rprint("[#ab333d]Shutting down...")
                         global running

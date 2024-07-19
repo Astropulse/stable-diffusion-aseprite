@@ -31,6 +31,7 @@ checkpoint_dict_replacements = {
     'cond_stage_model.transformer.final_layer_norm.': 'cond_stage_model.transformer.text_model.final_layer_norm.',
 }
 
+global loaded_loras
 loaded_loras = []
 
 def convert_diffusers_name_to_compvis(key, is_sd2):
@@ -214,6 +215,7 @@ def load_lora(filename, model):
     return lora
 
 def lora_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.MultiheadAttention]):
+    global loaded_loras
     """
     Applies the currently selected set of Loras to the weights of torch layer self.
     If weights already have this particular set of loras applied, does nothing.
@@ -340,13 +342,16 @@ def lora_MultiheadAttention_load_state_dict(self, *args, **kwargs):
     return torch.nn.MultiheadAttention_load_state_dict_before_lora(self, *args, **kwargs)
 
 
-def unload():
-    pass
+def lora_unload():
+    global loaded_loras
+    loaded_loras = []
 
 def register_lora_for_inference(lora):
+    global loaded_loras
     loaded_loras.append(lora)
     
 def remove_lora_for_inference(lora):
+    global loaded_loras
     loaded_loras.remove(lora)
 
 def apply_lora():    
