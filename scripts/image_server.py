@@ -1785,7 +1785,7 @@ def generateLLMPrompts(prompts, negatives, seed, translate):
 
 
 # Warning messages for loras
-def manageModifiers(loras):
+def manageModifiers(loras, use_ella):
     for lora in loras:
         _, loraName = os.path.split(lora["file"])
         if loraName != "none":
@@ -1851,7 +1851,7 @@ def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
             ]):
                 prefix = "pixel, pixel art"
                 suffix = ""
-            elif any(f"{_}.pxlm" in loraNames for _ in ["simplegeometric"]):
+            elif any(f"{_}.pxlm" in loraNames for _ in ["simplegeometric", "industrial"]):
                 prefix = "pixel, pixel art"
                 suffix = "outlines"
             elif any(f"{_}.pxlm" in loraNames for _ in ["nashorkimitems"]):
@@ -2549,7 +2549,7 @@ def prepare_inference(title, prompt, negative, use_ella, adherence, translate, p
                 rprint(f"[#494b9b]Using [#48a971]{os.path.splitext(loraName)[0]} [#494b9b]LoRA with [#48a971]{loraPair['weight']}% [#494b9b]strength")
     
     # Manage modifiers
-    loras = manageModifiers(loras)
+    loras = manageModifiers(loras, use_ella)
 
     seeds = []
     encoded_latent = []
@@ -3019,7 +3019,7 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
     apply_lora()
 
     # Manage modifiers
-    loras = manageModifiers(loras)
+    loras = manageModifiers(loras, use_ella)
 
     # Patch tiling for model and modelTA
     model, modelFS, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV)
@@ -3257,7 +3257,7 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
     apply_lora()
 
     # Manage modifiers
-    loras = manageModifiers(loras)
+    loras = manageModifiers(loras, use_ella)
 
     # Patch tiling for model and modelTA
     model, modelFS, modelTA, modelPV = patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV)
