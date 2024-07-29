@@ -1829,9 +1829,9 @@ def managePrompts(prompts, negatives, loras, promptTuning, use_ella):
             prefix = "pixel, pixel art"
             suffix = ""
             if negative == "":
-                negativeList = ["frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
+                negativeList = ["noise, frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
             else:
-                negativeList = [negative, "frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
+                negativeList = [negative, "noise, frame, blurry, nude, nsfw, border, signature, vignette, snowglobe, letterbox"]
 
             # Lora specific modifications
             if any(f"{_}.pxlm" in loraNames for _ in [
