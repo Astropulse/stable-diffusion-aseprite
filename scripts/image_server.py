@@ -195,8 +195,12 @@ def clearCache():
 
 
 def oom_error(traceback):
-    return ("torch.cuda.OutOfMemoryError" in traceback or "out of memory" in traceback)
-
+    if ("torch.cuda.OutOfMemoryError" in traceback or "out of memory" in traceback):
+        global modelSettings
+        modelSettings = ""
+        return True
+    else:
+        return False
 
 # Play sound file
 def audioThread(file):
@@ -701,7 +705,7 @@ def decodeImage(imageString):
         if imageString["format"] == "png":
             return Image.open(BytesIO(base64.b64decode(imageString["image"]))).convert("RGB")
         else:
-            return Image.frombytes(format, (imageString["width"], imageString["height"]), base64.b64decode(imageString["image"])).convert("RGB")
+            return Image.frombytes("RGBA", (imageString["width"], imageString["height"]), base64.b64decode(imageString["image"])).convert("RGB")
     except:
         rprint(f"\n[#ab333d]ERROR: Image cannot be decoded from bytes. It may have been corrupted.")
         print(imageString)
