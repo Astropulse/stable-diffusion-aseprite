@@ -156,6 +156,11 @@ def clearCache():
             torch.mps.empty_cache()
         except:
             pass
+    else:
+        try:
+            torch.cuda.ipc_collect()
+        except:
+            pass
 
 
 # Play sound file
