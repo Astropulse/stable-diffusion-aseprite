@@ -4653,7 +4653,7 @@ rprint("\n" + climage(Image.open("logo.png"), "centered") + "\n\n")
 
 rprint("[#48a971]Starting Image Generator...")
 
-start_server = serve(server, "localhost", 8765, max_size=100 * 1024 * 1024)
+start_server = serve(server, "localhost", 8765, max_size=100 * 1024 * 1024, ping_interval=None, ping_timeout=None, close_timeout=None)
 
 rprint("[#c4f129]Connected")
 
