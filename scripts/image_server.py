@@ -2712,6 +2712,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     precision, model_precision, vae_precision = get_precision(device, precision)
     precision_scope = autocast(device, precision, model_precision)
 
+    original_strength = strength
     with torch.no_grad():
         with precision_scope:
             base_count = 0
@@ -2729,7 +2730,6 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                         pre_embed = image_embed[run]
                     
                     pre_steps = steps
-                    full_steps = round(steps * 0.6)
 
                     for step, samples_ddim in enumerate(sample_cldm(
                         model_patcher,
@@ -2743,7 +2743,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                         W,
                         H,
                         pre_embed, # initial latent for img2img
-                        strength, # denoise strength
+                        original_strength, # denoise strength
                         "kl_optimal" # scheduler
                     )):
                         if preview:
@@ -2757,8 +2757,6 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                                 displayOut.append({"name": name, "seed": seed, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
                                 message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
                             yield message
-                    
-                    strength = 0.75
                     
                     x_sample_image, _ = render(modelFS, modelTA, modelPV, samples_ddim[0:1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
                     x_sample_image = convert_palette(x_sample_image, paletteImage, 1.0)
@@ -2788,6 +2786,10 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     # Delete the samples to free up memory
                     del samples_ddim
 
+                    if run > 0:
+                        raw_loras.pop()
+                        controlnets.pop()
+
                     # Add lcm
                     raw_loras.append({"sd": load_lora_raw(os.path.join(modelPath, "quality.lcm")), "weight": 30})
 
@@ -2795,6 +2797,10 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     netPath = os.path.join(modelPath, "CONTROLNET")
                     controlnets.append({"model_file": os.path.join(netPath, "Composition.safetensors"), "image": x_sample_image, "weight": 0.8})
                     model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
+
+                    encoded_latent = image_embed
+                    full_steps = round(steps * 0.6)
+                    strength = 0.75
                 else:
                     encoded_latent = image_embed
                     full_steps = steps
