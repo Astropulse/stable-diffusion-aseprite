@@ -14,7 +14,7 @@ try:
     from einops import rearrange
     from pytorch_lightning import seed_everything
     from transformers import BlipProcessor, BlipForConditionalGeneration, AutoImageProcessor, AutoModelForDepthEstimation, set_seed, T5Tokenizer, T5ForConditionalGeneration
-    from typing import Optional
+    from typing import Optional, Tuple
     from safetensors.torch import load_file
     from cryptography.fernet import Fernet
     import psutil
@@ -149,7 +149,7 @@ system_models = ["quality", "adapter", "crop", "detail", "brightness", "contrast
 global sounds
 sounds = False
 
-expectedVersion = "12.5.0"
+expectedVersion = "12.6.0"
 
 global maxSize
 
@@ -1442,6 +1442,180 @@ def filterList(data, m=0.7):
     return filtered
 
 
+# Color style transfer thanks to ProGamer
+def color_transfer(
+    input: torch.Tensor,
+    source: torch.Tensor,
+    mode: str = "pca",
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Transfer the colors from one image tensor to another, so that the target image's
+    histogram matches the source image's histogram. Applications for image histogram
+    matching includes neural style transfer and astronomy.
+    The source image is not required to have the same height and width as the target
+    image. Batch and channel dimensions are required to be the same for both inputs.
+    Gatys, et al., "Controlling Perceptual Factors in Neural Style Transfer", arXiv, 2017.
+    https://arxiv.org/abs/1611.07865
+    Args:
+        input (torch.Tensor): The NCHW or CHW image to transfer colors from source
+            image to from the source image.
+        source (torch.Tensor): The NCHW or CHW image to transfer colors from to the
+            input image.
+        mode (str): The color transfer mode to use. One of 'pca', 'cholesky', or 'sym'.
+            Default: "pca"
+        eps (float): The desired epsilon value to use.
+            Default: 1e-5
+    Returns:
+        matched_image (torch.tensor): The NCHW input image with the colors of source
+            image. Outputs should ideally be clamped to the desired value range to
+            avoid artifacts.
+    """
+
+    assert input.dim() == 3 or input.dim() == 4
+    assert source.dim() == 3 or source.dim() == 4
+    input = input.unsqueeze(0) if input.dim() == 3 else input
+    source = source.unsqueeze(0) if source.dim() == 3 else source
+    assert input.shape[:2] == source.shape[:2]
+
+    # Handle older versions of PyTorch
+    torch_cholesky = (
+        torch.linalg.cholesky if torch.__version__ >= "1.9.0" else torch.cholesky
+    )
+
+    def torch_symeig_eigh(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        torch.symeig() was deprecated in favor of torch.linalg.eigh()
+        """
+        if torch.__version__ >= "1.9.0":
+            L, V = torch.linalg.eigh(x, UPLO="U")
+        else:
+            L, V = torch.symeig(x, eigenvectors=True, upper=True)
+        return L, V
+
+    def get_mean_vec_and_cov(
+        x_input: torch.Tensor, eps: float
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Convert input images into a vector, subtract the mean, and calculate the
+        covariance matrix of colors.
+        """
+        x_mean = x_input.mean(3).mean(2)[:, :, None, None]
+
+        # Subtract the color mean and convert to a vector
+        B, C = x_input.shape[:2]
+        x_vec = (x_input - x_mean).reshape(B, C, -1)
+
+        # Calculate covariance matrix
+        x_cov = torch.bmm(x_vec, x_vec.permute(0, 2, 1)) / x_vec.shape[2]
+
+        # This line is only important if you get artifacts in the output image
+        x_cov = x_cov + (eps * torch.eye(C, device=x_input.device)[None, :])
+        return x_mean, x_vec, x_cov
+
+    def pca(x: torch.Tensor) -> torch.Tensor:
+        """Perform principal component analysis"""
+        eigenvalues, eigenvectors = torch_symeig_eigh(x)
+        e = torch.sqrt(torch.diag_embed(eigenvalues.reshape(eigenvalues.size(0), -1)))
+        # Remove any NaN values if they occur
+        if torch.isnan(e).any():
+            e = torch.where(torch.isnan(e), torch.zeros_like(e), e)
+        return torch.bmm(torch.bmm(eigenvectors, e), eigenvectors.permute(0, 2, 1))
+
+    # Collect & calculate required values
+    _, input_vec, input_cov = get_mean_vec_and_cov(input, eps)
+    source_mean, _, source_cov = get_mean_vec_and_cov(source, eps)
+
+    # Calculate new cov matrix for input
+    if mode == "pca":
+        new_cov = torch.bmm(pca(source_cov), torch.inverse(pca(input_cov)))
+    elif mode == "cholesky":
+        new_cov = torch.bmm(
+            torch_cholesky(source_cov), torch.inverse(torch_cholesky(input_cov))
+        )
+    elif mode == "sym":
+        p = pca(input_cov)
+        pca_out = pca(torch.bmm(torch.bmm(p, source_cov), p))
+        new_cov = torch.bmm(torch.bmm(torch.inverse(p), pca_out), torch.inverse(p))
+    else:
+        raise ValueError(
+            "mode has to be one of 'pca', 'cholesky', or 'sym'."
+            + " Received '{}'.".format(mode)
+        )
+
+    # Multiply input vector by new cov matrix
+    new_vec = torch.bmm(new_cov, input_vec)
+
+    # Reshape output vector back to input's shape &
+    # add the source mean to our output vector
+    output = new_vec.reshape(input.shape) + source_mean
+
+    return output
+
+
+# Helper script for quantizing a tensor really fast
+def quantize_tensor(source_tensor, target_tensor):
+    """
+    Custom quantizes the target image to the closest matching colors available in the source image and returns the result as a tensor.
+
+    Args:
+        source_tensor: Torch tensor containing the source image. (NCHW format)
+        target_tensor: Torch tensor containing the target image. (NCHW format)
+
+    Returns:
+        quantized_tensor: The target image quantized to the source colors in NCHW format.
+    """
+
+    # Convert the source and target tensors to numpy arrays
+    source_image_np = source_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()  # Convert [C, H, W] -> [H, W, C]
+    target_image_np = target_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()  # Convert [C, H, W] -> [H, W, C]
+
+    # Flatten the source image to get unique colors
+    unique_colors = np.unique(source_image_np.reshape(-1, 3), axis=0)
+    
+    # Reshape the target image to a flat list of pixels
+    target_pixels = target_image_np.reshape(-1, 3)
+
+    # Custom quantization: find the closest source color for each pixel in the target image
+    quantized_pixels = np.zeros_like(target_pixels)
+    
+    for i, pixel in enumerate(target_pixels):
+        # Calculate the Euclidean distance between the pixel and all unique colors
+        distances = np.linalg.norm(unique_colors - pixel, axis=1)
+        # Find the index of the closest color
+        closest_color_index = np.argmin(distances)
+        # Assign the closest color to the quantized pixel
+        quantized_pixels[i] = unique_colors[closest_color_index]
+
+    # Reshape quantized pixels back to the original target image shape
+    quantized_image_np = quantized_pixels.reshape(target_image_np.shape)
+
+    # Convert the quantized image back to a tensor in NCHW format
+    quantized_tensor = torch.tensor(quantized_image_np).permute(2, 0, 1).unsqueeze(0)  # Convert [H, W, C] -> [N, C, H, W]
+
+    return quantized_tensor
+
+
+def reduce_color_distribution(image: Image.Image, accuracy_threshold: float = 0.98) -> Image.Image:
+    pixels = np.array(image.convert('RGB')).reshape(-1, 3)
+    unique_colors, counts = np.unique(pixels, axis=0, return_counts=True)
+    
+    original_distribution = counts / counts.sum()
+    scale_factor = 1.0
+    
+    while True:
+        scaled_counts = np.maximum(np.round(counts / scale_factor).astype(int), 1)
+        new_distribution = scaled_counts / scaled_counts.sum()
+        if np.sum(np.minimum(original_distribution, new_distribution)) < accuracy_threshold:
+            break
+        scale_factor += 0.1
+    
+    scaled_counts = np.maximum(np.round(counts / (scale_factor - 0.1)).astype(int), 1)
+    new_pixels = np.concatenate([np.tile(color, (count, 1)) for color, count in zip(unique_colors, scaled_counts)], axis=0)
+    
+    return Image.fromarray(new_pixels.reshape(1, -1, 3).astype(np.uint8), 'RGB')
+
+
 # Used color distances to determine the best palette to fit an image
 def determine_best_palette_verbose(image, palettes):
     # Convert the image to RGB mode
@@ -1482,6 +1656,72 @@ def determine_best_palette_verbose(image, palettes):
     # Find the best match
     best_match_index = np.argmin(filterList(distortions))
     return paletteImages[best_match_index], palettes[best_match_index]["name"]
+
+
+def colorTransfer(images, reference):
+
+    rprint(f"\n[#48a971]Converting output[white] to reference colors")
+
+    timer = time.time()
+
+    def load_tensor_images(images):
+        # Ensure images is a list
+        if not isinstance(images, list):
+            images = [images]
+
+        # Convert the images to NumPy and then to PyTorch tensors
+        tensor_images = [torch.tensor(np.array(image.convert("RGB"))).permute(2, 0, 1).float() / 255 for image in images]
+
+        # Stack them to create an NCHW tensor
+        return torch.stack(tensor_images)  # Shape: [N, C, H, W]
+    
+    def tensor_to_image(tensor):
+        # Iterate over the batch
+        images = []
+        for i in range(tensor.size(0)):  # N is the batch size
+            # Select the i-th image in the batch and remove the batch dimension (CHW format)
+            image_tensor = tensor[i]
+            
+            # Convert the tensor to a NumPy array and change from CHW to HWC format
+            np_array = image_tensor.permute(1, 2, 0).numpy()  # Convert [C, H, W] -> [H, W, C]
+            
+            # Scale the values to [0, 255] if necessary and convert to uint8
+            np_array = (np_array * 255).astype(np.uint8)
+            
+            # Create a PIL image from the NumPy array
+            images.append(Image.fromarray(np_array))
+        
+        return images
+
+    # Load images as tensors
+    for i, image in enumerate(images):
+        images[i] = decodeImage(image)
+    
+    reference = load_tensor_images(reduce_color_distribution(decodeImage(reference)))
+
+    output = []
+    count = 0
+    for image in clbar(images, name="Processed", position="last", unit="image", prefixwidth=12, suffixwidth=28):
+
+        # Do color transfer on input image
+        for _ in clbar([image], name="Transfered", position="first", prefixwidth=12, suffixwidth=28):
+            matched_tensor = color_transfer(load_tensor_images(image), reference).clamp(0, 1)
+
+            output_image = tensor_to_image(quantize_tensor(reference, matched_tensor))[0]
+
+        count += 1
+
+        name = str(hash(str([count, reference])))
+        output.append({"name": name, "format": "bytes", "image": encodeImage(output_image, "bytes"), "width": output_image.width, "height": output_image.height})
+
+        if image != images[-1]:
+            play("iteration.wav")
+        else:
+            play("batch.wav")
+
+    rprint(f"[#c4f129]Converted [#48a971]{len(images)}[#c4f129] images in [#48a971]{round(time.time()-timer, 2)}[#c4f129] seconds")
+
+    return output
 
 
 # Restricts an image to a set of colors determined by the input
@@ -1801,8 +2041,8 @@ def manageModifiers(loras, use_ella):
                     rprint(f'[#ab333d]Maximum recommended strength for "Modern" modifier is 60%. Higher values may cause unpredictable results.')
                 elif loraName in "tiling tiling16 tiling32" and lora["weight"] > 70:
                     rprint(f'[#ab333d]Maximum recommended strength for "Tiling" modifier is 70%. Higher values may cause unpredictable results.')
-                elif loraName == "topdown" and lora["weight"] > 90:
-                    rprint(f'[#ab333d]Maximum recommended strength for "Top-down" modifier is 90%. Higher values may cause unpredictable results.')
+                elif loraName == "topdown" and lora["weight"] > 80:
+                    rprint(f'[#ab333d]Maximum recommended strength for "Top-down" modifier is 80%. Higher values may cause unpredictable results.')
                 elif loraName == "gameicons" and lora["weight"] > 60:
                     rprint(f'[#ab333d]Maximum recommended strength for "Game Items" modifier is 60%. Higher values may cause unpredictable results.')
                 elif loraName == "uipanel" and lora["weight"] < 60:
@@ -2712,6 +2952,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
     precision, model_precision, vae_precision = get_precision(device, precision)
     precision_scope = autocast(device, precision, model_precision)
 
+    original_strength = strength
     with torch.no_grad():
         with precision_scope:
             base_count = 0
@@ -2729,7 +2970,6 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                         pre_embed = image_embed[run]
                     
                     pre_steps = steps
-                    full_steps = round(steps * 0.6)
 
                     for step, samples_ddim in enumerate(sample_cldm(
                         model_patcher,
@@ -2743,7 +2983,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                         W,
                         H,
                         pre_embed, # initial latent for img2img
-                        strength, # denoise strength
+                        original_strength, # denoise strength
                         "kl_optimal" # scheduler
                     )):
                         if preview:
@@ -2757,8 +2997,6 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                                 displayOut.append({"name": name, "seed": seed, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
                                 message.append({"action": "display_image", "type": title, "value": {"images": displayOut, "prompts": data, "negatives": negative_data}})
                             yield message
-                    
-                    strength = 0.75
                     
                     x_sample_image, _ = render(modelFS, modelTA, modelPV, samples_ddim[0:1], device, precision, H, W, pixelSize, pixelvae, False, False, raw_loras, post)
                     x_sample_image = convert_palette(x_sample_image, paletteImage, 1.0)
@@ -2788,6 +3026,10 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     # Delete the samples to free up memory
                     del samples_ddim
 
+                    if run > 0:
+                        raw_loras.pop()
+                        controlnets.pop()
+
                     # Add lcm
                     raw_loras.append({"sd": load_lora_raw(os.path.join(modelPath, "quality.lcm")), "weight": 30})
 
@@ -2795,6 +3037,10 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
                     netPath = os.path.join(modelPath, "CONTROLNET")
                     controlnets.append({"model_file": os.path.join(netPath, "Composition.safetensors"), "image": x_sample_image, "weight": 0.8})
                     model_patcher, cldm_cond, cldm_uncond = load_controlnet(controlnets, W, H, modelFileString, 0, conditioning, negative_conditioning, loras = raw_loras)
+                    
+                    encoded_latent = image_embed
+                    full_steps = round(steps * 0.6)
+                    strength = 0.75
                 else:
                     encoded_latent = image_embed
                     full_steps = steps
@@ -4529,6 +4775,19 @@ async def server(websocket):
                                 values["intensity"],
                             )
                             await websocket.send(json.dumps({"action": "returning", "type": "palettize", "value": {"images": images}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "colorTransfer":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+                            images = colorTransfer(
+                                values["images"],
+                                values["reference"],
+                            )
+                            await websocket.send(json.dumps({"action": "returning", "type": "colorTransfer", "value": {"images": images}}))
                         except Exception as e:
                             rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
