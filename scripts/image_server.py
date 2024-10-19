@@ -1383,45 +1383,37 @@ def kDenoise(image, smoothing, strength):
 
 
 # Uses curve fitting to find the optimal number of colors to reduce an image to
-def determine_best_k(image, max_k, n_samples=10000, smooth_window=7):
+def determine_best_k(image, max_k, n_samples=10000):
+    # Convert the image to RGB and sample pixels
     image = image.convert("RGB")
+    pixels = np.array(image).reshape(-1, 3)
 
-    # Flatten the image pixels and sample them
-    pixels = np.array(image)
-    pixel_indices = np.reshape(pixels, (-1, 3))
+    if len(pixels) > n_samples:
+        pixels = pixels[np.random.choice(len(pixels), n_samples, replace=False)]
 
-    if pixel_indices.shape[0] > n_samples:
-        pixel_indices = pixel_indices[np.random.choice(pixel_indices.shape[0], n_samples, replace=False), :]
-
-    # Compute centroids for max_k
+    # Generate quantized centroids for max_k colors
     quantized_image = image.quantize(colors=max_k, method=Image.Quantize.FASTOCTREE, kmeans=max_k, dither=0)
-    centroids_max_k = np.array(quantized_image.getpalette()[: max_k * 3]).reshape(-1, 3)
+    centroids = np.array(quantized_image.getpalette()[:max_k * 3]).reshape(-1, 3)
 
-    distortions = []
+    # Pre-calculate pairwise distances once to minimize repeated calculations
+    distances = scipy.spatial.distance.cdist(pixels, centroids)
+    distortions = np.zeros(max_k)
+
+    # Calculate distortions for each k using cumulative sums of precomputed distances
     for k in range(1, max_k + 1):
-        subset_centroids = centroids_max_k[:k]
+        min_distances = np.min(distances[:, :k], axis=1)
+        distortions[k - 1] = np.sum(min_distances**2)
 
-        # Calculate distortions using SciPy
-        distances = scipy.spatial.distance.cdist(pixel_indices, subset_centroids)
-        min_distances = np.min(distances, axis=1)
-        distortions.append(np.sum(min_distances**2))
-
-    # Calculate slope changes
+    # Determine the elbow point using slope change
     slopes = np.diff(distortions)
     relative_slopes = np.diff(slopes) / (np.abs(slopes[:-1]) + 1e-8)
-
-    # Find the elbow point based on the maximum relative slope change
     if len(relative_slopes) <= 1:
-        return 2  # Return at least 2 if not enough data for slopes
-    elbow_index = np.argmax(np.abs(relative_slopes))
+        return 4  # Return at least 4 if not enough data for slopes
 
-    # Calculate the actual k value, considering the reductions due to diff and smoothing
-    actual_k = (elbow_index + 3 + (smooth_window // 2) * 2)  # Add the reduction from diff and smoothing
+    elbow_index = np.argmax(np.abs(relative_slopes)) + 1  # Correct indexing after diff
+    optimal_k = max(4, min(elbow_index + 2, max_k))  # Ensure k is within the range
 
-    # Ensure actual_k is at least 1 and does not exceed max_k
-    actual_k = max(4, min(actual_k, max_k))
-
-    return actual_k
+    return optimal_k
 
 
 # Filters a list of data to remove outliers
@@ -1658,7 +1650,7 @@ def determine_best_palette_verbose(image, palettes):
     return paletteImages[best_match_index], palettes[best_match_index]["name"]
 
 
-def colorTransfer(images, reference):
+def colorTransfer(images, reference, strict):
 
     rprint(f"\n[#48a971]Converting output[white] to reference colors")
 
@@ -1707,7 +1699,10 @@ def colorTransfer(images, reference):
         for _ in clbar([image], name="Transfered", position="first", prefixwidth=12, suffixwidth=28):
             matched_tensor = color_transfer(load_tensor_images(image), reference).clamp(0, 1)
 
-            output_image = tensor_to_image(quantize_tensor(reference, matched_tensor))[0]
+            if strict:
+                matched_tensor = quantize_tensor(reference, matched_tensor)
+
+            output_image = tensor_to_image(matched_tensor)[0]
 
         count += 1
 
@@ -4786,6 +4781,7 @@ async def server(websocket):
                             images = colorTransfer(
                                 values["images"],
                                 values["reference"],
+                                values["strict"]
                             )
                             await websocket.send(json.dumps({"action": "returning", "type": "colorTransfer", "value": {"images": images}}))
                         except Exception as e:
