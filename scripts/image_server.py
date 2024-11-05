@@ -2735,7 +2735,7 @@ def prepare_inference(title, prompt, negative, use_ella, adherence, translate, p
         negative_data.append(temp_n)
     seed_everything(seed)
 
-    rprint(f"\n[#48a971]{title}[white] generating [#48a971]{total_images}[white] images with [#48a971]{steps}[white] steps over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
+    rprint(f"\n[#48a971]{title}[white] generating [#48a971]{total_images}[white] images with [#48a971]{steps}[white] steps over [#48a971]{runs}[white] batches at [#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels")
 
     global model
     global modelCS
@@ -3199,7 +3199,7 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
 
     seed_everything(seed)
 
-    rprint(f"\n[#48a971]Text to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
+    rprint(f"\n[#48a971]Text to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels")
 
     sampler = "pxlcm"
 
@@ -3437,7 +3437,7 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
         negative_data.append(temp_n)
     seed_everything(seed)
 
-    rprint(f"\n[#48a971]Image to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W}[white]x[#48a971]{H}[white] ([#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels)")
+    rprint(f"\n[#48a971]Image to Image[white] generating [#48a971]{total_images}[white] quality [#48a971]{quality}[white] images over [#48a971]{runs}[white] batches at [#48a971]{W // pixelSize}[white]x[#48a971]{H // pixelSize}[white] pixels")
 
     sampler = "pxlcm"
 
@@ -3666,6 +3666,45 @@ def prompt2prompt(path, prompt, negative, generations, seed):
     rprint(f"[#c4f129]Prompt enhancement completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
 
     return prompts
+
+
+def promptExtract(model_folder, reference, prompt):
+    timer = time.time()
+    global loadedDevice
+
+    # Check gpu availability
+    if torch.cuda.is_available():
+        loadedDevice = "cuda"
+    elif torch.backends.mps.is_available():
+        loadedDevice = "mps"
+    else:
+        loadedDevice = "cpu"
+        rprint(f"\n[#ab333d]GPU is not responding, loading model in CPU mode")
+
+    global modelBLIP
+    if modelBLIP is None:
+        global modelPath
+        modelPath = model_folder
+        modelBLIP = load_blip(os.path.join(modelPath, "BLIP"))
+
+    if modelBLIP is not None:
+        processor = modelBLIP["processor"]
+        model = modelBLIP["model"]
+
+        blip_image = resize_image(reference, 512)
+        if prompt is not None:
+            inputs = processor(blip_image, prompt, return_tensors="pt")
+        else:
+            inputs = processor(blip_image, return_tensors="pt")
+
+        rprint(f"\n[#48a971]Vision model [/]generating image description")
+        prompt = remove_repeated_words(processor.decode(model.generate(**inputs, max_new_tokens=30)[0], skip_special_tokens=True))
+        rprint(f"[#48a971]Caption: [#494b9b]{prompt}")
+
+    play("batch.wav")
+    rprint(f"\n[#c4f129]Image description completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+    
+    return prompt
 
 
 def generateTextureMaps(images, modelPath, ops):
@@ -4724,6 +4763,21 @@ async def server(websocket):
                             rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
                             await websocket.send(json.dumps({"action": "error"}))
+                    case "promptExtract":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+
+                            prompt = promptExtract(
+                                values["model_folder"],
+                                decodeImage(values["reference"]),
+                                values["description"],
+                            )
+                            await websocket.send(json.dumps({"action": "returning", "type": "promptExtract", "value": prompt}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
                     case "benchmark":
                         try:
                             # Extract parameters from the message
@@ -4860,6 +4914,7 @@ async def server(websocket):
                             pass
 
                         if extensionVersion == expectedVersion:
+                            rprint(f"[#c4f129]Installed Retro Diffusion version: {extensionVersion}")
                             play("click.wav")
                             await websocket.send(json.dumps({"action": "connected"}))
                         else:
