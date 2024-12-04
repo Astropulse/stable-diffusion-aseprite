@@ -120,7 +120,7 @@ def clbar(iterable, name="", printEnd="\r", position="", unit="it", disable=Fals
         for i, item in enumerate(iterable):
             yield item
 
-def process(img, model, device):
+def process(img, model, device = "cuda"):
     img = img * 1. / np.iinfo(img.dtype).max
     img = img[:, :, [2, 1, 0]]
     img = torch.from_numpy(np.transpose(img, (2, 0, 1))).float()

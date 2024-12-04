@@ -4914,7 +4914,6 @@ async def server(websocket):
                             pass
 
                         if extensionVersion == expectedVersion:
-                            rprint(f"[#c4f129]Installed Retro Diffusion version: {extensionVersion}")
                             play("click.wav")
                             await websocket.send(json.dumps({"action": "connected"}))
                         else:
