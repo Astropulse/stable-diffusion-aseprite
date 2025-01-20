@@ -3870,6 +3870,186 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
         rprint(f"[#c4f129]Benchmark completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n{printTests}\n[white]The maximum size possible on your hardware with less than [#48a971]{timeLimit}[white] seconds per step is [#48a971]{maxSize*8}[white]x[#48a971]{maxSize*8}[white] ([#48a971]{maxSize}[white]x[#48a971]{maxSize}[white] pixels)")
 
 
+def api_generate_images(
+    api_key: str,
+    prompt: str,
+    expand_prompt: bool = False,
+    input_image = None,
+    style: str = "default",
+    model: str = "RD_FLUX",
+    width: int = 256,
+    height: int = 256,
+    strength: float = 0.5,
+    seed: int = 0,
+    num_images: int = 1
+):
+    # 1. Convert local image to Base64
+    if input_image is not None:
+        buffered = BytesIO()
+        # It is very important to convert the image to RGB.
+        input_image.convert("RGB").save(buffered, format="PNG")
+        base64_input_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    # 2. Prepare the request
+    url = "https://api.retrodiffusion.ai/v1/inferences"
+    method = "POST"
+    headers = {
+        "X-RD-Token": api_key,
+    }
+
+    if input_image is not None:
+        payload = {
+            "prompt": prompt,
+            "expand_prompt": expand_prompt,
+            "prompt_style": style,
+            "model": model,
+            "width": width,
+            "height": height,
+            "input_image": base64_input_image,
+            "strength": strength,
+            "num_images": num_images,
+            "seed": seed
+        }
+    else:
+        payload = {
+            "prompt": prompt,
+            "expand_prompt": expand_prompt,
+            "prompt_style": style,
+            "model": model,
+            "width": width,
+            "height": height,
+            "num_images": num_images,
+            "seed": seed
+        }
+
+    # 3. Send the request
+    response = requests.request(method, url, headers=headers, json=payload)
+
+    images = []
+    # 4. Handle response
+    if response.status_code == 200:
+        data = response.json()
+        # data['base64_images'] is a list of base64-encoded image strings
+        base64_images = data.get("base64_images", [])
+        if base64_images:
+            for img_data in base64_images:
+                # Decode the base64 string
+                img_bytes = base64.b64decode(img_data)
+                # Convert to a Pillow Image and append to the list
+                image = Image.open(BytesIO(img_bytes))
+                resized_image = image.resize((width, height), Image.NEAREST)
+                images.append(resized_image)
+            return images
+        else:
+            print("No images returned by the API.")
+            return "no_images"
+    else:
+        return str(response.text)
+
+
+def apitxt2img(prompt, style, translate, W, H, seed, total_images, preview, api_key):
+    timer = time.time()
+
+    # Set the seed for random number generation if not provided
+    if seed == None:
+        seed = randint(0, 1000000)
+
+    rprint(f"\n[#48a971]Retrodiffusion.ai Text to Image[white] generating [#48a971]{total_images}[white] images at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
+
+    for image in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
+        images = api_generate_images(
+            api_key,
+            prompt,
+            expand_prompt = translate,
+            style = style,
+            width = W,
+            height = H,
+            seed = seed,
+            num_images = total_images
+        )
+
+    if isinstance(images, str):
+        if "Invalid or missing X-RD-Token" in images:
+            rprint(f"\n[#ab333d]====> Retrodiffusion.ai API key provided is not valid. <====")
+        else:
+            rprint(f"\n[#ab333d]ERROR: {images}")
+        yield [{"action": "error"}]
+    else:
+        if preview:
+            message = [{"action": "display_title", "type": "txt2img", "value": {"text": f"Generating..."}}]
+            # Render and send image previews
+            displayOut = []
+            for i in range(total_images):
+                x_sample_image = images[i]
+                name = str(seed+i)
+                displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+            message.append({"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": prompt, "negatives": ""}})
+            yield message
+
+        final = []
+        for i in range(total_images):
+            x_sample_image = images[i]
+            name = str(hash(str([prompt, style, translate, W, H, seed+i])) & 0x7FFFFFFFFFFFFFFF)
+            final.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+        play("batch.wav")
+        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+        yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
+
+
+def apiimg2img(prompt, style, translate, W, H, seed, images, strength, total_images, preview, api_key):
+    timer = time.time()
+
+    # Set the seed for random number generation if not provided
+    if seed == None:
+        seed = randint(0, 1000000)
+
+    init_img = decodeImage(images[0])
+    strength = strength / 100
+
+    rprint(f"\n[#48a971]Retrodiffusion.ai Image to Image[white] generating [#48a971]{total_images}[white] images at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
+
+    for image in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
+        images = api_generate_images(
+            api_key,
+            prompt,
+            expand_prompt = translate,
+            style = style,
+            input_image = init_img,
+            width = W,
+            height = H,
+            strength = strength,
+            seed = seed,
+            num_images = total_images
+        )
+
+    if isinstance(images, str):
+        if "Invalid or missing X-RD-Token" in images:
+            rprint(f"\n[#ab333d]====> Retrodiffusion.ai API key provided is not valid. <====")
+        else:
+            rprint(f"\n[#ab333d]ERROR: {images}")
+        yield [{"action": "error"}]
+    else:
+        if preview:
+            message = [{"action": "display_title", "type": "txt2img", "value": {"text": f"Generating..."}}]
+            # Render and send image previews
+            displayOut = []
+            for i in range(total_images):
+                x_sample_image = images[i]
+                name = str(seed+i)
+                displayOut.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+            message.append({"action": "display_image", "type": "txt2img", "value": {"images": displayOut, "prompts": prompt, "negatives": ""}})
+            yield message
+
+        final = []
+        for i in range(total_images):
+            x_sample_image = images[i]
+            name = str(hash(str([prompt, style, translate, W, H, seed+i])) & 0x7FFFFFFFFFFFFFFF)
+            final.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
+        play("batch.wav")
+        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+        yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
+
+
 async def server(websocket):
     background = False
     global kill_process
@@ -4366,6 +4546,90 @@ async def server(websocket):
                                     rprint(f"\n[#ab333d]Try disabling LLM enhanced prompts to free up gpu resources")
                             else:
                                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "apitxt2img":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "txt2img", "value": {"text": "Generating..."}}))
+                            for result in apitxt2img(
+                                values["prompt"],
+                                values["style"],
+                                values["translate"],
+                                values["width"],
+                                values["height"],
+                                values["seed"],
+                                values["generations"],
+                                values["send_progress"],
+                                values["api_key"]
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                clearCache()
+                                kill_process = False
+                                break
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "apiimg2img":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generating..."}}))
+                            for result in apiimg2img(
+                                values["prompt"],
+                                values["style"],
+                                values["translate"],
+                                values["width"],
+                                values["height"],
+                                values["seed"],
+                                values["image"],
+                                values["strength"],
+                                values["generations"],
+                                values["send_progress"],
+                                values["api_key"]
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+                                if kill_process:
+                                    break
+                            if kill_process:
+                                rprint(f"\n[#ab333d]Process canceled")
+                                play("error.wav")
+                                lora_unload()
+                                clearCache()
+                                kill_process = False
+                                break
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
                             await websocket.send(json.dumps({"action": "error"}))
                     case "cntxt2img":
