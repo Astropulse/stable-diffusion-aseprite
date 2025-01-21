@@ -3931,6 +3931,7 @@ def api_generate_images(
         data = response.json()
         # data['base64_images'] is a list of base64-encoded image strings
         base64_images = data.get("base64_images", [])
+        remaining_credits = data.get("remaining_credits", "unavailable")
         if base64_images:
             for img_data in base64_images:
                 # Decode the base64 string
@@ -3939,7 +3940,7 @@ def api_generate_images(
                 image = Image.open(BytesIO(img_bytes))
                 resized_image = image.resize((width, height), Image.NEAREST)
                 images.append(resized_image)
-            return images
+            return images, remaining_credits
         else:
             print("No images returned by the API.")
             return "no_images"
@@ -3957,7 +3958,7 @@ def apitxt2img(prompt, style, translate, W, H, seed, total_images, preview, api_
     rprint(f"\n[#48a971]Retrodiffusion.ai Text to Image[white] generating [#48a971]{total_images}[white] images at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
 
     for image in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
-        images = api_generate_images(
+        images, remaining_credits = api_generate_images(
             api_key,
             prompt,
             expand_prompt = translate,
@@ -3992,7 +3993,7 @@ def apitxt2img(prompt, style, translate, W, H, seed, total_images, preview, api_
             name = str(hash(str([prompt, style, translate, W, H, seed+i])) & 0x7FFFFFFFFFFFFFFF)
             final.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
         play("batch.wav")
-        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
         yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 
@@ -4009,7 +4010,7 @@ def apiimg2img(prompt, style, translate, W, H, seed, images, strength, total_ima
     rprint(f"\n[#48a971]Retrodiffusion.ai Image to Image[white] generating [#48a971]{total_images}[white] images at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
 
     for image in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
-        images = api_generate_images(
+        images, remaining_credits = api_generate_images(
             api_key,
             prompt,
             expand_prompt = translate,
@@ -4046,7 +4047,7 @@ def apiimg2img(prompt, style, translate, W, H, seed, images, strength, total_ima
             name = str(hash(str([prompt, style, translate, W, H, seed+i])) & 0x7FFFFFFFFFFFFFFF)
             final.append({"name": name, "seed": seed+i, "format": "bytes", "image": encodeImage(x_sample_image, "bytes"), "width": x_sample_image.width, "height": x_sample_image.height})
         play("batch.wav")
-        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+        rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
         yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 
