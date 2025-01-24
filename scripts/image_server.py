@@ -713,6 +713,73 @@ def decodeImage(imageString):
         return None
 
 
+# File downloader from URL
+def downloadFile(link, file_name):
+    headers = {'User-Agent': 'python-requests/2.30.0', 'Accept-Encoding': 'deflate', 'Accept': '*/*', 'Connection': 'keep-alive'}
+    retry = True
+    try:
+        response = requests.get(link, stream=True, headers = headers)
+        total_length = response.headers.get('content-length')
+
+        if total_length is None:
+            link = re.sub(r'\.cdn\.', '.', link)
+            response = requests.get(link, stream=True, headers = headers)
+            total_length = response.headers.get('content-length')
+            
+        if total_length is not None:
+            total_length = int(total_length)
+
+            chunk = (1024*1024) # 1mb chunk
+            unit = "mb"
+            if total_length < chunk*3:
+                chunk = 1024 # 1kb chunk
+                unit = "kb"
+                if total_length < chunk*3:
+                    chunk = 1 # 1b chunk
+                    unit = "b"
+
+            downloaded = False
+
+            if os.path.exists(file_name):
+                if os.stat(file_name).st_size == total_length:
+                    downloaded = True
+
+            if not downloaded:
+                while retry:
+                    with open(file_name, "wb") as f:
+                        for data in clbar(response.iter_content(chunk_size=chunk), total = round(total_length/chunk), name = "Downloading", unit = unit, prefixwidth = 12, suffixwidth = 28):
+                            f.write(data)
+
+                    if os.path.exists(file_name):
+                        if os.stat(file_name).st_size == total_length:
+                            retry = False
+                            play("iteration.wav")
+                            break
+                        else:
+                            play("error.wav")
+                            rprint(f'\n\n[#ab333d]File "{file_name}" could not be downloaded fully, please check your internet connection.\nLeave the console focussed for best results.')
+                            user_input = input("Press Enter to retry the file download. Type \"cancel\" to skip the file.\n").strip().lower()
+                            if user_input == 'cancel':
+                                rprint("\n[#48a971]You will need to run setup again to download the required file.\n")
+                                retry = False
+                                break
+                            else:
+                                rprint("[#48a971]Retrying...")
+                                pass
+            else:
+                rprint(f'[#494b9b]File is already downloaded - skipping')
+        else:
+            play("error.wav")
+            rprint(f"\n[#ab333d]File size could not be determined, this indicates an issue with the file host header response")
+    except Exception as e:
+        play("error.wav")
+        if "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]" in traceback.format_exc():
+            rprint(f'[#ab333d]While downloading file "{file_name}" an SSL error occured. Wait for the process to finish and attempt setup again.')
+        else:
+            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+            rprint(f'[#ab333d]File "{file_name}" could not be downloaded, please check your internet connection')
+
+
 # Open the image and convert it to a tensor with values with range -1, 1
 def load_img(image, h0, w0):
     image.convert("RGB")
@@ -4051,6 +4118,27 @@ def apiimg2img(prompt, style, translate, W, H, seed, images, strength, total_ima
         yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 
+def downloadStandaloneModels(path, key):
+
+    fernet = Fernet(key)
+    downloadableFiles = "../data/downloadables"
+    with open(downloadableFiles, 'rb') as enc_file:
+        encrypted = enc_file.read()
+
+    downloadDict = json.loads(BytesIO(fernet.decrypt(encrypted)).getvalue().decode('utf-8'))
+
+    if not os.path.exists(path):
+        os.mkdir(path)
+
+    # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
+    rprint(f'\n[#48a971]Downloading Standalone Model files\n')
+    
+    for file in downloadDict["standalone"]["files"]:
+        downloadFile(file["url"], os.path.join(path, file["name"]))
+    
+    rprint(f'\n[#48a971]Download complete\n')
+
+
 async def server(websocket):
     background = False
     global kill_process
@@ -4062,6 +4150,17 @@ async def server(websocket):
             try:
                 message = json.loads(message)
                 match message["action"]:
+                    case "downloadFiles":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+                            downloadStandaloneModels(values["path"], values["key"])
+                            
+                            await websocket.send(json.dumps({"action": "returning", "type": "downloaded", "value": None}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
                     case "transform":
                         try:
                             title = "Neural Transform"
