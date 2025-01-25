@@ -136,7 +136,8 @@ def load_controlnet(
     if False: #size > 144:
         lora_model_patcher = ApplyMSWMSAAttention().patch(lora_model_patcher, *attn_use_blocks, "percent", *attn_range)
 
-    lora_model_patcher = ApplyRAUNet().patch(
+    if controlnets == []:
+        lora_model_patcher = ApplyRAUNet().patch(
             True,  # noqa: FBT003
             lora_model_patcher,
             *ra_use_blocks,
@@ -148,6 +149,7 @@ def load_controlnet(
             *ca_use_blocks,
             "bilinear",
         )
+        
 
     return lora_model_patcher, cldm_conditioning, cldm_negative_conditioning
 
