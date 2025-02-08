@@ -1,0 +1,86 @@
+[
+	{
+		"name": "Default",
+		"tag": "default",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Simple",
+		"tag": "simple",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Detailed",
+		"tag": "detailed",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Anime",
+		"tag": "anime",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Game Asset",
+		"tag": "game_asset",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Portrait",
+		"tag": "portrait",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Texture",
+		"tag": "texture",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "UI Element",
+		"tag": "ui",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Spritesheet",
+		"tag": "spritesheet",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "Minecraft Texture",
+		"tag": "mc_texture",
+		"min_size": 16,
+		"max_size": 128
+	},
+	{
+		"name": "Minecraft Item",
+		"tag": "mc_item",
+		"min_size": 16,
+		"max_size": 128
+	},
+	{
+		"name": "Character Turnaround",
+		"tag": "character_turnaround",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "1-Bit",
+		"tag": "1_bit",
+		"min_size": 32,
+		"max_size": 512
+	},
+	{
+		"name": "No Style",
+		"tag": "no_style",
+		"min_size": 32,
+		"max_size": 512
+	}
+]
