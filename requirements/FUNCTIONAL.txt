@@ -24,6 +24,10 @@ accelerate==0.24.1
 taming-transformers-rom1504==0.0.6
 pandas==2.2.2
 torchsde==0.2.6
+matplotlib==3.10.0
+colour-science==0.4.6
+scikit-learn==1.5.1
+minisom==2.3.3
 git+https://github.com/Astropulse/hitherdither#egg=hitherdither
 git+https://github.com/openai/CLIP#egg=clip
 git+https://github.com/Astropulse/k-diffusion#egg=k_diffusion
