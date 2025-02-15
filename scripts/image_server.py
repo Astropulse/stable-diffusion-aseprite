@@ -9,6 +9,10 @@ try:
     from random import randint
     from omegaconf import OmegaConf
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    from sklearn.cluster import MeanShift, estimate_bandwidth
+    from sklearn.neighbors import NearestNeighbors
+    from minisom import MiniSom
+    import colour
     import cv2
     from itertools import product
     from einops import rearrange
@@ -1786,6 +1790,174 @@ def colorTransfer(images, reference, strict):
     return output
 
 
+def mean_shift_quantize(img: Image.Image, quantile: float = 0.04) -> Image.Image:
+    # 1. Convert to RGB (drop alpha if present)
+    img_rgb = img.convert("RGB")
+    orig_w, orig_h = img_rgb.size
+
+    # Compute the downscale factor
+    x = math.sqrt(orig_w * orig_h)
+    if x < 1:
+        return 1.0  # Avoid scaling tiny images up
+
+    factor = (0.00001*x**2 + 0.07*x + 14.9) / x
+    down_w = max(1, int(round(orig_w * factor)))
+    down_h = max(1, int(round(orig_h * factor)))
+
+    # 2. Downscale
+    downscaled_img = img_rgb.resize((down_w, down_h), Image.Resampling.NEAREST)
+    downscaled_arr = np.array(downscaled_img, dtype=np.uint8)  # (down_h, down_w, 3)
+
+    # Convert to float [0..1]
+    downscaled_float = downscaled_arr.astype(np.float64) / 255.0
+
+    # Convert sRGB -> XYZ -> Oklab
+    down_xyz = colour.sRGB_to_XYZ(downscaled_float)
+    down_oklab = colour.XYZ_to_Oklab(down_xyz)
+
+    # Flatten for clustering (N, 3)
+    pixels_down = down_oklab.reshape(-1, 3)
+
+    # 3. Estimate bandwidth & run Mean Shift in Oklab
+    bandwidth = estimate_bandwidth(pixels_down, quantile=quantile)
+    ms = MeanShift(bin_seeding=True, bandwidth=bandwidth)
+    ms.fit(pixels_down)
+
+    centers_oklab = ms.cluster_centers_  # shape: (k, 3)
+    n_clusters = len(centers_oklab)
+
+    # 4. Assign each full-resolution pixel to the nearest cluster center (in Oklab)
+    original_arr = np.array(img_rgb, dtype=np.uint8)  # (H, W, 3)
+    original_float = original_arr.astype(np.float64) / 255.0
+
+    # Convert full-res sRGB -> XYZ -> Oklab
+    original_xyz = colour.sRGB_to_XYZ(original_float)
+    original_oklab = colour.XYZ_to_Oklab(original_xyz)
+
+    orig_pixels = original_oklab.reshape(-1, 3)  # (H*W, 3)
+
+    # Nearest neighbor structure over cluster centers (in Oklab)
+    nn = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(centers_oklab)
+    distances, indices = nn.kneighbors(orig_pixels)
+    assigned_oklab = centers_oklab[indices.flatten()].reshape(orig_h, orig_w, 3)
+
+    # Convert assigned Oklab -> sRGB
+    assigned_xyz = colour.Oklab_to_XYZ(assigned_oklab)
+    assigned_srgb = colour.XYZ_to_sRGB(assigned_xyz)
+    assigned_srgb = np.clip(assigned_srgb, 0, 1)
+
+    # Convert back to uint8
+    quantized_full = (assigned_srgb * 255).astype(np.uint8)
+
+    # 5. Build final image
+    quantized_full_img = Image.fromarray(quantized_full, mode="RGB")
+    return quantized_full_img
+
+
+def get_palette_oklab(palette_img: Image.Image) -> np.ndarray:
+    """
+    Convert all unique colors in palette_img (up to 256) into an Oklab array.
+    Returns shape (K, 3) float64 in Oklab.
+    """
+    # Convert to RGB and flatten
+    pal_rgb = palette_img.convert("RGB")
+    pal_pixels = np.array(pal_rgb).reshape(-1, 3)
+    unique_colors = np.unique(pal_pixels, axis=0)  # (K, 3)
+    unique_float = unique_colors.astype(np.float64) / 255.0
+    xyz = colour.sRGB_to_XYZ(unique_float)
+    oklab = colour.XYZ_to_Oklab(xyz)
+    return oklab
+
+
+def determine_som_grid(k: int) -> (int, int):
+    """
+    Determine a grid shape (rows, cols) such that rows*cols is at least k.
+    We try to make the grid as square as possible.
+    """
+    rows = int(math.floor(math.sqrt(k)))
+    cols = int(math.ceil(k / rows))
+    return rows, cols
+
+
+def som_quantize_with_palette(image: Image.Image, palette_img: Image.Image, iterations: int = 71) -> Image.Image:
+    """
+    Quantize 'image' so that its final colors are adapted from the given palette.
+    
+    Steps:
+      1. Convert both the image and palette to Oklab.
+      2. Determine a SOM grid whose number of nodes is equal to the number of palette colors.
+      3. Initialize the SOM nodes with the palette colors.
+      4. Train the SOM on the image's pixel data (in Oklab) for a number of iterations.
+      5. For each image pixel, find its best matching unit (BMU) in the SOM.
+      6. Optionally, snap each BMU’s weight vector to the nearest original palette color.
+      7. Convert the quantized image back to sRGB.
+    
+    This produces an image whose colors come from a slightly adapted version of your target palette.
+    """
+    # --- Convert image to Oklab.
+    img_rgb = image.convert("RGB")
+    arr = np.array(img_rgb, dtype=np.uint8)
+    float_arr = arr.astype(np.float64) / 255.0
+    xyz_arr = colour.sRGB_to_XYZ(float_arr)
+    oklab_arr = colour.XYZ_to_Oklab(xyz_arr)
+    pixels = oklab_arr.reshape(-1, 3)
+    
+    # --- Convert palette to Oklab.
+    palette_oklab = get_palette_oklab(palette_img)  # shape (k, 3)
+    k = len(palette_oklab)
+    if k == 0:
+        print("Warning: Palette image contains no colors!")
+        return img_rgb
+    
+    # --- Determine SOM grid shape: use exactly k nodes.
+    rows, cols = determine_som_grid(k)
+    total_nodes = rows * cols
+    
+    # --- Initialize SOM with the palette colors.
+    # If total_nodes > k, we will repeat some palette colors.
+    init_weights = np.zeros((rows, cols, 3))
+    palette_list = palette_oklab.tolist()
+    for i in range(rows):
+        for j in range(cols):
+            idx = i * cols + j
+            init_weights[i, j] = palette_oklab[idx % k]
+    
+    # --- Create and initialize the SOM.
+    # Input length = 3 (for Oklab). Choose a small sigma to keep nodes near the seeds.
+    som = MiniSom(rows, cols, 3, sigma=0.22, learning_rate=0.2, random_seed=42)
+    som._weights = init_weights.copy()
+    
+    # --- Train the SOM on the image's Oklab pixels.
+    som.train_random(pixels, iterations)
+    
+    # --- Optionally: Snap each SOM node to the nearest original palette color.
+    # This forces the final quantized palette to come exactly from the provided palette.
+    weights = som._weights.reshape(-1, 3)  # shape (total_nodes, 3)
+    # Build a NearestNeighbors structure for the palette.
+    nn_pal = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(palette_oklab)
+    _, indices = nn_pal.kneighbors(weights)
+    snapped_weights = palette_oklab[indices.flatten()]
+    # Reshape back to SOM grid shape.
+    snapped_weights = snapped_weights.reshape(rows, cols, 3)
+    
+    # --- Quantize full-resolution image: assign each pixel to its BMU.
+    H, W, _ = oklab_arr.shape
+    quantized_oklab = np.zeros_like(oklab_arr)
+    for i in range(H):
+        for j in range(W):
+            pixel = oklab_arr[i, j]
+            bmu = som.winner(pixel)
+            # Use the snapped weight for the BMU.
+            quantized_oklab[i, j] = snapped_weights[bmu]
+    
+    # --- Convert quantized Oklab image back to sRGB.
+    quant_xyz = colour.Oklab_to_XYZ(quantized_oklab)
+    quant_srgb = colour.XYZ_to_sRGB(quant_xyz)
+    quant_srgb = np.clip(quant_srgb, 0, 1)
+    out_arr = (quant_srgb * 255).astype(np.uint8)
+    return Image.fromarray(out_arr, mode="RGB")
+
+
 # Restricts an image to a set of colors determined by the input
 def palettize(images, source, paletteURL, palettes, colors, dithering, strength, denoise, smoothness, intensity):
     # Check if a palette URL is provided and try to download the palette image
@@ -1841,9 +2013,6 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
         # Calculate the threshold for dithering
         threshold = 4 * strength
 
-        if source == "Automatic":
-            numColors = determine_best_k(image, 96)
-
         # Check if a palette file is provided
         if paletteImage is not None or source == "Best Palette":
             # Open the palette image and calculate the number of colors
@@ -1875,16 +2044,9 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
                         palette = hitherdither.palette.Palette(palette)
                         image_indexed = hitherdither.ordered.bayer.bayer_dithering(image_gama, palette, [threshold, threshold, threshold], order=dithering).convert("RGB")
             else:
-                # Extract palette colors
-                palette = np.concatenate([x[1] for x in paletteImage.getcolors(16777216)]).tolist()
-
-                # Create a new palette image
-                tempPaletteImage = Image.new("P", (len(palette) // 3, 1))
-                tempPaletteImage.putpalette(palette)
-
                 # Perform quantization without dithering
                 for _ in clbar([image], name="Palettizing", position="first", prefixwidth=12, suffixwidth=28):
-                    image_indexed = image.quantize(method=1, kmeans=numColors, palette=tempPaletteImage, dither=0).convert("RGB")
+                    image_indexed = som_quantize_with_palette(image, paletteImage)
 
         elif numColors > 0:
             if strength > 0 and dithering > 0:
@@ -1907,7 +2069,11 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
             else:
                 # Perform quantization without dithering
                 for _ in clbar([image], name="Palettizing", position="first", prefixwidth=12, suffixwidth=28):
-                    image_indexed = image.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+                    if source == "Automatic":
+                        numColors = determine_best_k(image, 96)
+                        image_indexed = image.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+                    else:
+                        image_indexed = mean_shift_quantize(image, quantile=0.04)
 
         count += 1
 
@@ -1933,9 +2099,7 @@ def palettizeOutput(images):
     for image in images:
         tempImage = image["image"]
 
-        numColors = determine_best_k(tempImage, 96)
-
-        image_indexed = tempImage.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
+        image_indexed = mean_shift_quantize(tempImage, quantile=0.04).convert("RGB")
 
         output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": image_indexed, "width": image["width"], "height": image["height"]})
     return output
