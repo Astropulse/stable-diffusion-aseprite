@@ -2070,10 +2070,9 @@ def palettize(images, source, paletteURL, palettes, colors, dithering, strength,
                 # Perform quantization without dithering
                 for _ in clbar([image], name="Palettizing", position="first", prefixwidth=12, suffixwidth=28):
                     if source == "Automatic":
-                        numColors = determine_best_k(image, 96)
-                        image_indexed = image.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
-                    else:
                         image_indexed = mean_shift_quantize(image, quantile=0.04)
+                    else:
+                        image_indexed = image.quantize(colors=numColors, method=1, kmeans=numColors, dither=0).convert("RGB")
 
         count += 1
 
