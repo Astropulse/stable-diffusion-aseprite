@@ -153,7 +153,7 @@ system_models = ["quality", "adapter", "crop", "detail", "brightness", "contrast
 global sounds
 sounds = False
 
-expectedVersion = "13.0.0"
+expectedVersion = "13.5.0"
 
 global maxSize
 
@@ -2108,6 +2108,32 @@ def palettizeOutput(images):
     return output
 
 
+# Helper function for automatic background removal
+def maskOutput(images, modelpath):
+    output = []
+    # remove background
+    for image in images:
+        tempImage = image["image"]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            size = math.sqrt(tempImage.width * tempImage.height)
+
+            # Upscale and resize the image for segmentation
+            upscale = max(1, int(1024 / size))
+            resize = tempImage.resize((tempImage.width * upscale, tempImage.height * upscale), resample=Image.Resampling.NEAREST)
+
+            # Initialize and apply segmentation model
+            segmenter.init(modelpath, resize.width, resize.height)
+            [masked_image, mask] = segmenter.segment(resize)
+
+            # Resize segmented image to original size and add to output
+            masked_image = masked_image.resize((tempImage.width, tempImage.height), resample=Image.Resampling.NEAREST)
+
+        output.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": masked_image, "width": image["width"], "height": image["height"]})
+    return output
+
+
 # Loads and applies background segmentation model
 def rembg(images, modelpath):
     timer = time.time()
@@ -3131,7 +3157,7 @@ def convert_palette(image, paletteImage, weight = 1.0):
 
 
 # Run controlnet inference
-def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, adherence, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, mapColors, post, init_img = None, paletteImage = None):
+def neural_inference(modelFileString, title, controlnets, prompt, negative, use_ella, adherence, autocaption, translate, promptTuning, W, H, pixelSize, steps, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, preview, pixelvae, rembg, mapColors, post, init_img = None, paletteImage = None):
     timer = time.time()
     global modelCS
     global modelFS
@@ -3362,6 +3388,9 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
             elif post and paletteImage is None:
                 output = palettizeOutput(output)
 
+            if rembg:
+                output = maskOutput(output, modelPath)
+
             final = []
             for image in output:
                 final.append({"name": image["name"], "seed": image["seed"], "format": image["format"], "image": encodeImage(image["image"], image["format"]), "width": image["width"], "height": image["height"]})
@@ -3372,7 +3401,7 @@ def neural_inference(modelFileString, title, controlnets, prompt, negative, use_
 
 
 # Generate image from text prompt
-def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, post):
+def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, quality, scale, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, tilingX, tilingY, preview, pixelvae, rembg, post):
     timer = time.time()
     
     # Check gpu availability
@@ -3595,6 +3624,9 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
 
         if post:
             output = palettizeOutput(output)
+        
+        if rembg:
+            output = maskOutput(output, modelPath)
 
         final = []
         for image in output:
@@ -3605,7 +3637,7 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
 
 
 # Generate image from image+text prompt
-def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, quality, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, images, tilingX, tilingY, preview, pixelvae, post):
+def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H, pixelSize, quality, scale, strength, lighting, composition, seed, total_images, maxBatchSize, device, precision, loras, images, tilingX, tilingY, preview, pixelvae, rembg, post):
     timer = time.time()
 
     # Check gpu availability
@@ -3861,6 +3893,9 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
 
         if post:
             output = palettizeOutput(output)
+
+        if rembg:
+            output = maskOutput(output, modelPath)
 
         final = []
         for image in output:
@@ -4783,6 +4818,7 @@ async def server(websocket):
                                 values["tile_y"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                values["rembg"],
                                 values["post_process"],
                             ):
                                 if values["send_progress"]:
@@ -4997,6 +5033,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                values["rembg"],
                                 None,
                                 values["post_process"],
                                 paletteImage=paletteImage
@@ -5077,6 +5114,7 @@ async def server(websocket):
                                 values["tile_y"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                values["rembg"],
                                 values["post_process"],
                             ):
                                 if values["send_progress"]:
@@ -5207,6 +5245,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                values["rembg"],
                                 None,
                                 values["post_process"],
                                 decodeImage(values["images"][len(values["images"])-1]),
