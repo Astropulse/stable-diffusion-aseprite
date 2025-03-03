@@ -280,13 +280,13 @@ def get_precision(device, precision):
         gpu_name = torch.cuda.get_device_name(device)
 
         # If GPU is nvidia 10xx force fp32 precision
-        if gpu_name.startswith("NVIDIA GeForce GTX 10") or gpu_name.startswith("NVIDIA GeForce GTX 9"):
+        if "NVIDIA GeForce GTX 10" in gpu_name or "NVIDIA GeForce GTX 9" in gpu_name:
             precision = "fp32"
             model_precision = torch.float32
             vae_precision = torch.float32
 
         # If GPU is nvidia 16xx use float16 and enable benchmark mode
-        elif gpu_name.startswith("NVIDIA GeForce GTX 16") and torch.cuda.get_device_capability(device) == (7, 5):
+        elif "NVIDIA GeForce GTX 16" in gpu_name and torch.cuda.get_device_capability(device) == (7, 5):
             torch.backends.cudnn.benchmark = True
             # Check for FP16 support
             # Can't trust gpus to report their capability properly
@@ -308,7 +308,7 @@ def get_precision(device, precision):
                 vae_precision = torch.float32
 
         # If GPU is nvidia 20xx disable float8 precision
-        elif gpu_name.startswith("NVIDIA GeForce RTX 20"):
+        elif "NVIDIA GeForce RTX 20" in gpu_name:
             precision = "fp16"
             model_precision = torch.float16
             vae_precision = torch.float16
@@ -326,7 +326,7 @@ def get_precision(device, precision):
             vae_precision = torch.bfloat16
         
         # If GPU is nvidia 30xx+ allow float8 and use bfloat16
-        elif gpu_name.startswith("NVIDIA GeForce"):
+        elif "NVIDIA GeForce" in gpu_name:
             if precision == "fp8":
                 try:
                     model_precision = torch.float8_e4m3fn
@@ -1760,7 +1760,8 @@ def colorTransfer(images, reference, strict):
     for i, image in enumerate(images):
         images[i] = decodeImage(image)
     
-    reference = load_tensor_images(reduce_color_distribution(decodeImage(reference)))
+    reference_pil = decodeImage(reference).convert("RGB")
+    reference = load_tensor_images(reduce_color_distribution(reference_pil))
 
     output = []
     count = 0
@@ -1769,11 +1770,14 @@ def colorTransfer(images, reference, strict):
         # Do color transfer on input image
         for _ in clbar([image], name="Transfered", position="first", prefixwidth=12, suffixwidth=28):
             matched_tensor = color_transfer(load_tensor_images(image), reference).clamp(0, 1)
+            output_image = tensor_to_image(matched_tensor)[0]
 
             if strict:
-                matched_tensor = quantize_tensor(reference, matched_tensor)
-
-            output_image = tensor_to_image(matched_tensor)[0]
+                paletteImage = reference_pil
+                numColors = len(paletteImage.getcolors(16777216))
+                if numColors > 256:
+                    paletteImage = paletteImage.quantize(colors=256, method=2, kmeans=256, dither=0).convert("RGB")
+                output_image = som_quantize_with_palette(output_image, paletteImage)
 
         count += 1
 
