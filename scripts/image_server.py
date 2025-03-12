@@ -4496,6 +4496,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                None,
                                 False,
                                 values["post_process"],
                                 init_img
@@ -4602,6 +4603,7 @@ async def server(websocket):
                                 loras,
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                None,
                                 values["color_map"],
                                 values["post_process"],
                                 init_img # Pass original, unscaled image
@@ -4705,6 +4707,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                None,
                                 values["color_map"],
                                 values["post_process"],
                                 init_img # Pass original, unscaled image
@@ -4806,6 +4809,7 @@ async def server(websocket):
                                 values["loras"],
                                 values["send_progress"],
                                 values["use_pixelvae"],
+                                None,
                                 values["color_map"],
                                 values["post_process"],
                                 init_img # Pass original, unscaled image
