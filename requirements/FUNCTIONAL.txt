@@ -18,7 +18,7 @@ transformers==4.40.2
 sentencepiece==0.2.0
 quanto==0.1.0
 torchmetrics==0.7.0
-safetensors==0.4.3
+safetensors==0.5.3
 kornia==0.6
 accelerate==0.24.1
 taming-transformers-rom1504==0.0.6
