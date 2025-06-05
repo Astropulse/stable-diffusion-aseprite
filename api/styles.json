@@ -1,86 +1,162 @@
-[
-	{
-		"name": "Default",
-		"tag": "default",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Simple",
-		"tag": "simple",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Detailed",
-		"tag": "detailed",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Anime",
-		"tag": "anime",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Game Asset",
-		"tag": "game_asset",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Portrait",
-		"tag": "portrait",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Texture",
-		"tag": "texture",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "UI Element",
-		"tag": "ui",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Spritesheet",
-		"tag": "spritesheet",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "Minecraft Texture",
-		"tag": "mc_texture",
-		"min_size": 16,
-		"max_size": 128
-	},
-	{
-		"name": "Minecraft Item",
-		"tag": "mc_item",
-		"min_size": 16,
-		"max_size": 128
-	},
-	{
-		"name": "Character Turnaround",
-		"tag": "character_turnaround",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "1-Bit",
-		"tag": "1_bit",
-		"min_size": 32,
-		"max_size": 512
-	},
-	{
-		"name": "No Style",
-		"tag": "no_style",
-		"min_size": 32,
-		"max_size": 512
-	}
-]
+{
+	"rd_fast": [
+		{
+			"name": "Default",
+			"tag": "rd_fast__default",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Simple",
+			"tag": "rd_fast__simple",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Detailed",
+			"tag": "rd_fast__detailed",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Retro",
+			"tag": "rd_fast__retro",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Game Asset",
+			"tag": "rd_fast__game_asset",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Portrait",
+			"tag": "rd_fast__portrait",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Texture",
+			"tag": "rd_fast__texture",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "UI Element",
+			"tag": "rd_fast__ui",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Item Sheet",
+			"tag": "rd_fast__item_sheet",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Minecraft Texture",
+			"tag": "rd_fast__mc_texture",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Minecraft Item",
+			"tag": "rd_fast__mc_item",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Character Turnaround",
+			"tag": "rd_fast__character_turnaround",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "1-Bit",
+			"tag": "rd_fast__1_bit",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "No Style",
+			"tag": "rd_fast__no_style",
+			"min_size": 64,
+			"max_size": 512
+		}
+	],
+	"rd_plus": [
+		{
+			"name": "Default",
+			"tag": "rd_plus__default",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Retro",
+			"tag": "rd_plus__retro",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Watercolor",
+			"tag": "rd_plus__watercolor",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Textured",
+			"tag": "rd_plus__textured",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Cartoon",
+			"tag": "rd_plus__cartoon",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "UI Element",
+			"tag": "rd_plus__ui_element",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Item Sheet",
+			"tag": "rd_plus__item_sheet",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Character Turnaround",
+			"tag": "rd_plus__character_turnaround",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Isometric",
+			"tag": "rd_plus__isometric",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Isometric Asset",
+			"tag": "rd_plus__isometric_asset",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Top Down Map",
+			"tag": "rd_plus__topdown_map",
+			"min_size": 64,
+			"max_size": 512
+		},
+		{
+			"name": "Top Down",
+			"tag": "rd_plus__top_down_asset",
+			"min_size": 64,
+			"max_size": 512
+		}
+	]
+}

@@ -4142,60 +4142,61 @@ def benchmark(device, precision, timeLimit, maxTestSize, errorRange, pixelvae, s
 def api_generate_images(
     api_key: str,
     prompt: str,
-    expand_prompt: bool = False,
     input_image = None,
     style: str = "default",
-    model: str = "RD_FLUX",
     width: int = 256,
     height: int = 256,
     strength: float = 0.5,
     seed: int = 0,
-    num_images: int = 1
+    num_images: int = 1,
+    tile_x: bool = False,
+    tile_y: bool = False,
+    rembg: bool = False,
+    paletteImage = None,
 ):
-    # 1. Convert local image to Base64
-    if input_image is not None:
-        buffered = BytesIO()
-        # It is very important to convert the image to RGB.
-        input_image.convert("RGB").save(buffered, format="PNG")
-        base64_input_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-    # 2. Prepare the request
+    # 1. Prepare the request
     url = "https://api.retrodiffusion.ai/v1/inferences"
     method = "POST"
     headers = {
         "X-RD-Token": api_key,
     }
-
+    payload = {
+        "prompt": prompt,
+        "prompt_style": style,
+        "width": width,
+        "height": height,
+        "num_images": num_images,
+        "seed": seed
+    }
+    
     if input_image is not None:
-        payload = {
-            "prompt": prompt,
-            "expand_prompt": expand_prompt,
-            "prompt_style": style,
-            "model": model,
-            "width": width,
-            "height": height,
-            "input_image": base64_input_image,
-            "strength": strength,
-            "num_images": num_images,
-            "seed": seed
-        }
-    else:
-        payload = {
-            "prompt": prompt,
-            "expand_prompt": expand_prompt,
-            "prompt_style": style,
-            "model": model,
-            "width": width,
-            "height": height,
-            "num_images": num_images,
-            "seed": seed
-        }
+        buffered = BytesIO()
+        # It is very important to convert the image to RGB.
+        input_image.convert("RGB").save(buffered, format="PNG")
+        base64_input_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        payload["input_image"] = base64_input_image
+        payload["strength"] = strength
 
-    # 3. Send the request
+    if tile_x:
+        payload["tile_x"] = True
+    if tile_y:
+        payload["tile_y"] = True
+
+    if paletteImage is not None:
+        buffered = BytesIO()
+        # It is very important to convert the image to RGB.
+        paletteImage.convert("RGB").save(buffered, format="PNG")
+        base64_input_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        payload["input_palette"] = base64_input_image
+    
+    if rembg:
+        payload["remove_bg"] = True
+
+    # 2. Send the request
     response = requests.request(method, url, headers=headers, json=payload)
 
     images = []
-    # 4. Handle response
+    # 3. Handle response
     if response.status_code == 200:
         data = response.json()
         # data['base64_images'] is a list of base64-encoded image strings
@@ -4217,7 +4218,7 @@ def api_generate_images(
         return str(response.text)
 
 
-def apitxt2img(prompt, style, translate, W, H, seed, total_images, preview, api_key):
+def apitxt2img(prompt, style, W, H, seed, total_images, rembg, tile_x, tile_y, preview, api_key, paletteImage = None):
     timer = time.time()
 
     # Set the seed for random number generation if not provided
@@ -4232,12 +4233,15 @@ def apitxt2img(prompt, style, translate, W, H, seed, total_images, preview, api_
         response = api_generate_images(
             api_key,
             prompt,
-            expand_prompt=translate,
             style=style,
             width=W,
             height=H,
             seed=seed,
-            num_images=total_images
+            num_images=total_images,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            rembg=rembg,
+            paletteImage=paletteImage
         )
 
     # Check the entire response for errors
@@ -4284,7 +4288,7 @@ def apitxt2img(prompt, style, translate, W, H, seed, total_images, preview, api_
     final = []
     for i in range(total_images):
         x_sample_image = generated_images[i]
-        name = str(hash(str([prompt, style, translate, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
+        name = str(hash(str([prompt, style, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
         final.append({
             "name": name,
             "seed": seed + i,
@@ -4299,7 +4303,7 @@ def apitxt2img(prompt, style, translate, W, H, seed, total_images, preview, api_
     yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 
-def apiimg2img(prompt, style, translate, W, H, seed, images, strength, total_images, preview, api_key):
+def apiimg2img(prompt, style, W, H, seed, images, strength, total_images, rembg, tile_x, tile_y, preview, api_key, paletteImage = None):
     timer = time.time()
 
     # Set the seed for random number generation if not provided
@@ -4317,14 +4321,17 @@ def apiimg2img(prompt, style, translate, W, H, seed, images, strength, total_ima
         response = api_generate_images(
             api_key,
             prompt,
-            expand_prompt=translate,
             style=style,
             input_image=init_img,
             width=W,
             height=H,
             strength=strength,
             seed=seed,
-            num_images=total_images
+            num_images=total_images,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            rembg=rembg,
+            paletteImage=paletteImage
         )
 
     # Check the entire response for errors
@@ -4371,7 +4378,7 @@ def apiimg2img(prompt, style, translate, W, H, seed, images, strength, total_ima
     final = []
     for i in range(total_images):
         x_sample_image = generated_images[i]
-        name = str(hash(str([prompt, style, translate, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
+        name = str(hash(str([prompt, style, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
         final.append({
             "name": name,
             "seed": seed + i,
@@ -4925,18 +4932,27 @@ async def server(websocket):
                             # Extract parameters from the message
                             values = message["value"]
 
+                            paletteImage = palette_from_source(
+                                values["source"],
+                                values["url"],
+                                values["palettes"]
+                            )
+
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": "txt2img", "value": {"text": "Generating..."}}))
                             for result in apitxt2img(
                                 values["prompt"],
                                 values["style"],
-                                values["translate"],
                                 values["width"],
                                 values["height"],
                                 values["seed"],
                                 values["generations"],
+                                values["rembg"],
+                                values["tile_x"],
+                                values["tile_y"],
                                 values["send_progress"],
-                                values["api_key"]
+                                values["api_key"],
+                                paletteImage=paletteImage
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
@@ -4966,20 +4982,29 @@ async def server(websocket):
                             # Extract parameters from the message
                             values = message["value"]
 
+                            paletteImage = palette_from_source(
+                                values["source"],
+                                values["url"],
+                                values["palettes"]
+                            )
+
                             if values["send_progress"]:
                                 await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generating..."}}))
                             for result in apiimg2img(
                                 values["prompt"],
                                 values["style"],
-                                values["translate"],
                                 values["width"],
                                 values["height"],
                                 values["seed"],
                                 values["image"],
                                 values["strength"],
                                 values["generations"],
+                                values["rembg"],
+                                values["tile_x"],
+                                values["tile_y"],
                                 values["send_progress"],
-                                values["api_key"]
+                                values["api_key"],
+                                paletteImage=paletteImage
                             ):
                                 if values["send_progress"]:
                                     await websocket.send(json.dumps(result[0]))
