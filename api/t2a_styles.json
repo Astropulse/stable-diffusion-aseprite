@@ -1,0 +1,16 @@
+{
+    "rd_animation": [
+		{
+			"name": "Four Angle Walking",
+			"tag": "animation__four_angle_walking",
+			"min_size": 48,
+			"max_size": 48
+		},
+		{
+			"name": "Visual Effects",
+			"tag": "animation__vfx",
+			"min_size": 32,
+			"max_size": 96
+		}
+	]
+}
