@@ -43,6 +43,7 @@ try:
     import segmenter
     import preprocessors.pose_util as pose_util
     from preprocessors.pbr_texture_util import generate_pbr
+    from postprocessors.pixel_correction_filter_util import pixel_correction_filter
     import hitherdither
 
     # Import PyTorch functions
@@ -1334,6 +1335,36 @@ def kCentroidVerbose(images, width, height, centroids, outline):
             play("batch.wav")
 
     rprint(f"\n[#c4f129]Resized in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+    return output
+
+
+def pixfixVerbose(images, identify = False):
+    timer = time.time()
+    for i, image in enumerate(images):
+        images[i] = decodeImage(image)
+
+    rprint(f"\n[#48a971]Applying PixFix filter [white] to image(s) ")
+
+    # Filter
+    count = 0
+    output = []
+    for image in clbar(images, name = "Processed", unit = "image", prefixwidth = 12, suffixwidth = 28):
+        count += 1
+        corrected_image, orphans = pixel_correction_filter(image)
+
+        output_image = orphans if identify else corrected_image
+
+        #output_image.save("test.png")
+
+        name = str(hash(str([image, count])))
+        output.append({"name": name, "format": "bytes", "image": encodeImage(output_image, "bytes"), "width": output_image.width, "height": output_image.height})
+
+        if image != images[-1]:
+            play("iteration.wav")
+        else:
+            play("batch.wav")
+
+    rprint(f"\n[#c4f129]Filtered in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
     return output
 
 
@@ -5694,6 +5725,16 @@ async def server(websocket):
                             values = message["value"]
                             images = pixelDetectVerbose(values["images"])
                             await websocket.send(json.dumps({"action": "returning", "type": "pixelDetect", "value": {"images": images}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "pixfix":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+                            images = pixfixVerbose(values["images"], values["identify"])
+                            await websocket.send(json.dumps({"action": "returning", "type": "pixfix", "value": {"images": images}}))
                         except Exception as e:
                             rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
