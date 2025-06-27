@@ -1,4 +1,8 @@
-import traceback
+import traceback, locale
+# ------------------------------------------------------------------
+#  Global UTF-8 override so Windows never feeds cp1252 to subprocess
+# ------------------------------------------------------------------
+locale.getpreferredencoding = lambda: "utf-8"
 try:
     print("Checking python environment, this may take one or more minutes.")
 
