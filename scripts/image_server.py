@@ -3041,6 +3041,7 @@ def prepare_inference(title, prompt, negative, use_ella, adherence, translate, p
         init_image.to(vae_precision)
 
     # !!! REMEMBER: ALL MODEL FILES ARE BOUND UNDER THE LICENSE AGREEMENTS OUTLINED HERE: https://astropulse.co/#retrodiffusioneula https://astropulse.co/#retrodiffusionmodeleula !!!
+    loraNames = []
     decryptedFiles = []
     fernet = Fernet("I47jl1hqUPug4KbVYd60_zeXhn_IH_ECT3QRGiBxdxo=")
     for i, loraPair in enumerate(loras):
@@ -3063,7 +3064,8 @@ def prepare_inference(title, prompt, negative, use_ella, adherence, translate, p
                             # Write attempted decrypted file
                             dec_file.write(decryptedFiles[i])
                             try:
-                                raw_loras.append({"sd": load_lora_raw(loraPair["file"]), "weight": loraPair["weight"]})   
+                                raw_loras.append({"sd": load_lora_raw(loraPair["file"]), "weight": loraPair["weight"]})
+                                loraNames.append(loraName)
                             except:
                                 # Decrypted file could not be read, revert to unchanged, and return an error
                                 decryptedFiles[i] = "none"
@@ -3081,6 +3083,17 @@ def prepare_inference(title, prompt, negative, use_ella, adherence, translate, p
     
     # Manage modifiers
     loras = manageModifiers(loras, use_ella)
+
+    with precision_scope:
+        for i, lora in enumerate(loraNames):
+            if os.path.splitext(loras[i]["file"])[1] == ".pxlm":
+                if decryptedFiles[i] != "none":
+                    try:
+                        encrypted = fernet.encrypt(decryptedFiles[i])
+                        with open(loras[i]["file"], "wb") as dec_file:
+                            dec_file.write(encrypted)
+                    except:
+                        rprint(f"\n[#e8be27]Warning: PXLM file could not be encoded. This is safe to ignore.")
 
     seeds = []
     encoded_latent = []
@@ -3648,9 +3661,13 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
                     remove_lora_for_inference(lora)
                 if os.path.splitext(loras[i]["file"])[1] == ".pxlm":
                     if decryptedFiles[i] != "none":
-                        encrypted = fernet.encrypt(decryptedFiles[i])
-                        with open(loras[i]["file"], "wb") as dec_file:
-                            dec_file.write(encrypted)
+                        try:
+                            encrypted = fernet.encrypt(decryptedFiles[i])
+                            with open(loras[i]["file"], "wb") as dec_file:
+                                dec_file.write(encrypted)
+                        except:
+                            rprint(f"\n[#e8be27]Warning: PXLM file could not be encoded. This is safe to ignore.")
+                            
         del loadedLoras
 
         if post:
@@ -3917,9 +3934,12 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
                     remove_lora_for_inference(lora)
                 if os.path.splitext(loras[i]["file"])[1] == ".pxlm":
                     if decryptedFiles[i] != "none":
-                        encrypted = fernet.encrypt(decryptedFiles[i])
-                        with open(loras[i]["file"], "wb") as dec_file:
-                            dec_file.write(encrypted)
+                        try:
+                            encrypted = fernet.encrypt(decryptedFiles[i])
+                            with open(loras[i]["file"], "wb") as dec_file:
+                                dec_file.write(encrypted)
+                        except:
+                            rprint(f"\n[#e8be27]Warning: PXLM file could not be encoded. This is safe to ignore.")
         del loadedLoras
 
         if post:
