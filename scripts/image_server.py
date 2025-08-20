@@ -2860,7 +2860,7 @@ def paletteGen(prompt, colors, seed, device, precision):
     width = 512+((512/base)*(colors-base))
 
     # Generate text-to-image conversion with specified parameters
-    for _ in txt2img(prompt, "", False, 1, False, False, int(width), 512, 1, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False):
+    for _ in txt2img(prompt, "", False, 1, False, False, int(width), 512, 1, 6, 7.0, {"apply":False}, {"hue":0, "tint":0, "saturation":50, "brightness":70, "contrast":50, "outline":50}, seed, 1, 512, device, precision, [{"file": "some/path/none", "weight": 0}], False, False, False, False, False, False):
         image = _[1]
 
     # Perform k-centroid downscaling on the image
