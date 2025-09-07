@@ -4360,6 +4360,95 @@ def apitxt2img(prompt, style, W, H, seed, total_images, rembg, tile_x, tile_y, p
            f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
     yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
+def apiimg2img(prompt, style, W, H, seed, image, strength, total_images, rembg, tile_x, tile_y, preview, api_key, paletteImage = None):
+    timer = time.time()
+
+    # Set the seed for random number generation if not provided
+    if seed is None:
+        seed = randint(0, 1000000)
+
+    init_img = decodeImage(image[0])
+    strength = strength / 100
+
+    rprint(f"\n[#48a971]Retrodiffusion.ai Image to Image[white] generating [#48a971]{total_images}"
+           f"[white] images at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
+    
+    # Call the API and store the complete response
+    for _ in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
+        response = api_generate_images(
+            api_key,
+            prompt,
+            style=style,
+            width=W,
+            height=H,
+            seed=seed,
+            num_images=total_images,
+            input_image=init_img,
+            strength=strength,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            rembg=rembg,
+            paletteImage=paletteImage
+        )
+
+    # Check the entire response for errors
+    if isinstance(response, str):
+        if "Invalid or missing X-RD-Token" in response:
+            rprint(f"\n[#ab333d]====> Retrodiffusion.ai API key provided is not valid. <====\nA correct key will be formatted like: rdpk-....")
+        else:
+            rprint(f"\n[#ab333d]ERROR: {response}")
+        yield [{"action": "error"}]
+        return
+
+    if not isinstance(response, (list, tuple)) or len(response) < 1:
+        rprint(f"\n[#ab333d]ERROR: Unexpected API response format")
+        yield [{"action": "error"}]
+        return
+
+    # Split the response into generated images and remaining credits if available
+    generated_images = response[0]
+    remaining_credits = response[1] if len(response) > 1 else None
+
+    # Process preview if enabled
+    if preview:
+        message = [{"action": "display_title", "type": "img2img", "value": {"text": "Generating..."}}]
+        displayOut = []
+        for i in range(total_images):
+            x_sample_image = generated_images[i]
+            name = str(seed + i)
+            displayOut.append({
+                "name": name,
+                "seed": seed + i,
+                "format": "bytes",
+                "image": encodeImage(x_sample_image, "bytes"),
+                "width": x_sample_image.width,
+                "height": x_sample_image.height
+            })
+        message.append({
+            "action": "display_image",
+            "type": "img2img",
+            "value": {"images": displayOut, "prompts": prompt, "negatives": ""}
+        })
+        yield message
+
+    # Process final image generation for output
+    final = []
+    for i in range(total_images):
+        x_sample_image = generated_images[i]
+        name = str(hash(str([prompt, style, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
+        final.append({
+            "name": name,
+            "seed": seed + i,
+            "format": "bytes",
+            "image": encodeImage(x_sample_image, "bytes"),
+            "width": x_sample_image.width,
+            "height": x_sample_image.height
+        })
+    play("batch.wav")
+    rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time() - timer, 2)} "
+           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
+    yield ["", {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
+
 
 def apitxt2anim(prompt, style, W, H, seed, preview, api_key):
     total_images = 1
