@@ -1,4 +1,4 @@
-setuptools==70.0.0
+setuptools==82.0.0
 colorama==0.4.6
 rich==13.3.2
 playsound==1.2.2
