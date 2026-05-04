@@ -1,7 +1,6 @@
 requests==2.30.0
 cryptography==42.0.8
 pygetwindow==0.0.9
-websockets==10.4
 albumentations==0.4.3
 opencv-python==4.12.0.88
 opencv-python-headless==4.12.0.88
@@ -24,6 +23,7 @@ accelerate==0.24.1
 taming-transformers-rom1504==0.0.6
 pandas==2.2.2
 torchsde==0.2.6
+websockets==13.1
 git+https://github.com/Astropulse/hitherdither#egg=hitherdither
 git+https://github.com/openai/CLIP#egg=clip
 git+https://github.com/Astropulse/k-diffusion#egg=k_diffusion
