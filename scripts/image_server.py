@@ -29,6 +29,8 @@ try:
     from optimization.taesd import TAESD
     from lora import (
         apply_lora,
+        load_lora_cached,
+        lora_cache_probe,
         assign_lora_names_to_compvis_modules,
         load_lora,
         load_lora_raw,
@@ -103,6 +105,15 @@ except:
 
 
 # Describe the active compute backend for logging
+def _terminal_size():
+    # Terminal size with a fallback for redirected/headless stdio, where
+    # os.get_terminal_size() raises OSError on Windows
+    try:
+        return os.get_terminal_size()
+    except (OSError, ValueError):
+        return os.terminal_size((120, 40))
+
+
 def backend_name():
     if torch.cuda.is_available():
         return "ROCm" if torch.version.hip else "CUDA"
@@ -128,6 +139,40 @@ else:
     print("Falling back to CPU mode")
 
 print(f"RAM available {psutil.virtual_memory().available / (1024 ** 3)}")
+
+# Performance notes: torch.backends.cudnn.benchmark was benchmarked on this
+# workload and rejected - its per-shape autotune costs seconds and generation
+# sizes vary constantly. TF32 is enabled: it slightly alters float32 math
+# (not bit-identical, visually equivalent) and speeds up fp32 fallback paths.
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+
+def keep_models_resident():
+    # With plenty of VRAM, keep auxiliary models (T5/ELLA) on the GPU between
+    # generations instead of shuffling them to system RAM every run
+    try:
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties("cuda").total_memory >= 11 * (1024 ** 3)
+    except:
+        pass
+    return False
+
+
+def vram_limited_batch_area(maxBatchSize, device):
+    # Cap the total batch area by free VRAM so large batches cannot OOM
+    if "cuda" in device and torch.cuda.is_available():
+        try:
+            free_mem = torch.cuda.mem_get_info()[0]
+            budget = free_mem - 1.5 * (1024 ** 3)
+            est = int(512 * math.sqrt(max(0.25, budget / (1.2 * (1024 ** 3)))))
+            if est < maxBatchSize:
+                rprint(f"[#494b9b]Batch area capped at [#48a971]{est}[#494b9b] (from [#48a971]{maxBatchSize}[#494b9b]) to fit available VRAM")
+                return est
+        except:
+            pass
+    return maxBatchSize
 
 
 # Global variables
@@ -575,7 +620,7 @@ def remove_repeated_words(string):
 # Print image in console
 def climage(image, alignment, *args):
     # Get console bounds with a small margin - better safe than sorry
-    twidth, theight = (os.get_terminal_size().columns - 1, (os.get_terminal_size().lines - 1) * 2)
+    twidth, theight = (_terminal_size().columns - 1, (_terminal_size().lines - 1) * 2)
 
     # Set up variables
     image = image.convert("RGBA")
@@ -660,7 +705,7 @@ def clbar(iterable, name="", printEnd="\r", position="", unit="it", disable=Fals
         prediction = f" 00:00 < 00:00 "
         prefix = max(len(name), len("100%"), prefixwidth)
         suffix = max(len(speed), len(prediction), suffixwidth)
-        barwidth = os.get_terminal_size().columns - (suffix + prefix + 2)
+        barwidth = _terminal_size().columns - (suffix + prefix + 2)
 
         # Prints the progress bar
         def printProgressBar(iteration, delay):
@@ -1067,6 +1112,8 @@ def load_T5(device, precision):
 # Unload ELLA if needed
 def unload_ella(device):
     global modelELLA
+    if keep_models_resident():
+        return
     if "cuda" in device and modelELLA is not None:
         mem = torch.cuda.memory_allocated() / 1e6
         modelELLA.to("cpu")
@@ -1078,6 +1125,8 @@ def unload_ella(device):
 # Unload T5xl if needed
 def unload_T5(device, force=False):
     global modelT5
+    if keep_models_resident() and not force:
+        return
     cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
     if cpuMemoryUnused > 8 and not force:
         if "cuda" in device and modelT5 is not None:
@@ -1162,6 +1211,15 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
         else:
             modelType = "general"
             rprint(f"Loading custom model from [#48a971]{modelFile}")
+
+        # Automatically enable the low VRAM path on small GPUs
+        if (not optimized) and "cuda" in device and torch.cuda.is_available():
+            try:
+                if torch.cuda.get_device_properties(device).total_memory < 5.5 * (1024 ** 3):
+                    optimized = True
+                    rprint(f"[#494b9b]Low VRAM GPU detected, enabling optimized mode automatically")
+            except:
+                pass
 
         # Determine if turbo mode is enabled
         turbo = True
@@ -1261,6 +1319,17 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
 
         if split:
             assign_lora_names_to_compvis_modules(model, modelCS)
+
+        # Experimental opt-in: compile the UNet (set RD_TORCH_COMPILE=1).
+        # Placed after LoRA name mapping so modifier weight-merging still sees
+        # the original module tree; compiled wrappers share the same parameters.
+        if os.environ.get("RD_TORCH_COMPILE") == "1" and "cuda" in device and split and not optimized:
+            try:
+                model.model1 = torch.compile(model.model1)
+                model.model2 = torch.compile(model.model2)
+                rprint(f"[#494b9b]torch.compile enabled - the first generation will be slow while kernels compile")
+            except Exception:
+                rprint(f"[#e8be27]torch.compile could not be enabled, continuing without it")
 
         modelName = modelFileString
         modelSettings = modelParams
@@ -3021,7 +3090,7 @@ def prepare_inference(title, prompt, negative, use_ella, adherence, translate, p
 
     # Calculate maximum batch size
     global maxSize
-    maxSize = maxBatchSize
+    maxSize = vram_limited_batch_area(maxBatchSize, device)
     size = math.sqrt(W * H)
     if size >= maxSize or device == "cpu":
         batch = 1
@@ -3504,7 +3573,7 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
 
     # Calculate maximum batch size
     global maxSize
-    maxSize = maxBatchSize
+    maxSize = vram_limited_batch_area(maxBatchSize, device)
     size = math.sqrt(W * H)
     if size >= maxSize or device == "cpu":
         batch = 1
@@ -3575,33 +3644,40 @@ def txt2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
         if loraName != "none":
             # Handle proprietary models
             if os.path.splitext(loraName)[1] == ".pxlm":
-                with open(loraPair["file"], "rb") as enc_file:
-                    encrypted = enc_file.read()
-                    try:
-                        # Assume file is encrypted, decrypt it
-                        decryptedFiles[i] = fernet.decrypt(encrypted)
-                    except:
-                        # Decryption failed, assume not encrypted
-                        decryptedFiles[i] = encrypted
-
-                    with open(loraPair["file"], "wb") as dec_file:
-                        # Write attempted decrypted file
-                        dec_file.write(decryptedFiles[i])
+                cached_lora = lora_cache_probe(loraPair["file"])
+                if cached_lora is not None:
+                    # Cache hit: skip the decrypt + rewrite + re-encrypt cycle
+                    loadedLoras.append(cached_lora)
+                    decryptedFiles[i] = "none"
+                else:
+                    with open(loraPair["file"], "rb") as enc_file:
+                        encrypted = enc_file.read()
                         try:
-                            # Load decrypted
-                            loadedLoras.append(load_lora(loraPair["file"], model))    
+                            # Assume file is encrypted, decrypt it
+                            decryptedFiles[i] = fernet.decrypt(encrypted)
                         except:
-                            # Decrypted file could not be read, revert to unchanged, and return an error
-                            decryptedFiles[i] = "none"
-                            dec_file.write(encrypted)
-                            loadedLoras.append(None)
-                            rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
-                            continue
+                            # Decryption failed, assume not encrypted
+                            decryptedFiles[i] = encrypted
+
+                        with open(loraPair["file"], "wb") as dec_file:
+                            # Write attempted decrypted file
+                            dec_file.write(decryptedFiles[i])
+                            try:
+                                # Load decrypted; Fernet re-encryption preserves
+                                # length, so the encrypted size is a stable key
+                                loadedLoras.append(load_lora_cached(loraPair["file"], model, cache_key=(loraPair["file"], len(encrypted))))
+                            except:
+                                # Decrypted file could not be read, revert to unchanged, and return an error
+                                decryptedFiles[i] = "none"
+                                dec_file.write(encrypted)
+                                loadedLoras.append(None)
+                                rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
+                                continue
             else:
                 # Add lora to unet
                 try:
                     # Load decrypted file
-                    loadedLoras.append(load_lora(loraPair["file"], model))
+                    loadedLoras.append(load_lora_cached(loraPair["file"], model))
                 except:
                     # File could not be read
                     loadedLoras.append(None)
@@ -3748,7 +3824,7 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
 
     # Calculate maximum batch size
     global maxSize
-    maxSize = maxBatchSize
+    maxSize = vram_limited_batch_area(maxBatchSize, device)
     size = math.sqrt(W * H)
     if size >= maxSize or device == "cpu":
         batch = 1
@@ -3821,7 +3897,16 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
         if loraName != "none":
             # Handle proprietary models
             if os.path.splitext(loraName)[1] == ".pxlm":
-                with open(loraPair["file"], "rb") as enc_file:
+                cached_lora = lora_cache_probe(loraPair["file"])
+                if cached_lora is not None:
+                    # Cache hit: skip the decrypt + rewrite + re-encrypt cycle
+                    loadedLoras.append(cached_lora)
+                    decryptedFiles[i] = "none"
+                    continue_load = False
+                else:
+                    continue_load = True
+                if continue_load:
+                  with open(loraPair["file"], "rb") as enc_file:
                     encrypted = enc_file.read()
                     try:
                         # Assume file is encrypted, decrypt it
@@ -3834,8 +3919,9 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
                         # Write attempted decrypted file
                         dec_file.write(decryptedFiles[i])
                         try:
-                            # Load decrypted file
-                            loadedLoras.append(load_lora(loraPair["file"], model))
+                            # Load decrypted file; Fernet re-encryption preserves
+                            # length, so the encrypted size is a stable cache key
+                            loadedLoras.append(load_lora_cached(loraPair["file"], model, cache_key=(loraPair["file"], len(encrypted))))
                         except:
                             # Decrypted file could not be read, revert to unchanged, and return an error
                             decryptedFiles[i] = "none"
@@ -3847,7 +3933,7 @@ def img2img(prompt, negative, use_ella, adherence, translate, promptTuning, W, H
                 # Add lora to unet
                 try:
                     # Load decrypted file
-                    loadedLoras.append(load_lora(loraPair["file"], model))
+                    loadedLoras.append(load_lora_cached(loraPair["file"], model))
                 except:
                     # File could not be read
                     loadedLoras.append(None)

@@ -15,6 +15,15 @@ from rich import print as rprint
 from colorama import just_fix_windows_console
 just_fix_windows_console()
 
+def _terminal_size():
+    # Terminal size with a fallback for redirected/headless stdio, where
+    # os.get_terminal_size() raises OSError on Windows
+    try:
+        return os.get_terminal_size()
+    except (OSError, ValueError):
+        return os.terminal_size((120, 40))
+
+
 def clbar(iterable, name = "", printEnd = "\r", position = "", unit = "it", disable = False, prefixwidth = 1, suffixwidth = 1, total = 0):
 
     # Console manipulation stuff
@@ -45,7 +54,7 @@ def clbar(iterable, name = "", printEnd = "\r", position = "", unit = "it", disa
         prediction = f" 00:00 < 00:00 "
         prefix = max(len(name), len("100%"), prefixwidth)
         suffix = max(len(speed), len(prediction), suffixwidth)
-        barwidth = os.get_terminal_size().columns-(suffix+prefix+2)
+        barwidth = _terminal_size().columns-(suffix+prefix+2)
 
         # Prints the progress bar
         def printProgressBar (iteration, delay):

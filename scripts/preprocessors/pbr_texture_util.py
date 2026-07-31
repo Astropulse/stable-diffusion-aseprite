@@ -12,6 +12,15 @@ import preprocessors.pbr_utils.imgops as ops
 import preprocessors.pbr_utils.architecture.architecture as arch
 
 # Print progress bar in console
+def _terminal_size():
+    # Terminal size with a fallback for redirected/headless stdio, where
+    # os.get_terminal_size() raises OSError on Windows
+    try:
+        return os.get_terminal_size()
+    except (OSError, ValueError):
+        return os.terminal_size((120, 40))
+
+
 def clbar(iterable, name="", printEnd="\r", position="", unit="it", disable=False, prefixwidth=1, suffixwidth=1, total=0):
     # Console manipulation stuff
     def up(lines=1):
@@ -41,7 +50,7 @@ def clbar(iterable, name="", printEnd="\r", position="", unit="it", disable=Fals
         prediction = f" 00:00 < 00:00 "
         prefix = max(len(name), len("100%"), prefixwidth)
         suffix = max(len(speed), len(prediction), suffixwidth)
-        barwidth = os.get_terminal_size().columns - (suffix + prefix + 2)
+        barwidth = _terminal_size().columns - (suffix + prefix + 2)
 
         # Prints the progress bar
         def printProgressBar(iteration, delay):
