@@ -172,7 +172,7 @@ system_models = ["quality", "adapter", "crop", "detail", "brightness", "contrast
 global sounds
 sounds = False
 
-expectedVersion = "14.0.0"
+expectedVersion = "15.0.0"
 
 global maxSize
 
@@ -4804,7 +4804,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -4911,7 +4911,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning","type": "img2img","value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -5015,7 +5015,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -5117,7 +5117,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -5192,7 +5192,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "txt2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -5507,7 +5507,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -5585,7 +5585,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size. If samples are at 100%, this was caused by the VAE running out of memory, try enabling the Fast Pixel Decoder")
                                 if modelLM is not None:
@@ -5720,7 +5720,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -5754,7 +5754,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "txt2pal", "value": {"images": images}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif oom_error(traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                                 if modelLM is not None:
@@ -5999,5 +5999,15 @@ timeout = 1
 # Run the server until it is completed
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    asyncio.get_event_loop().run_until_complete(start_server)
+    try:
+        asyncio.get_event_loop().run_until_complete(start_server)
+    except OSError as e:
+        # Port already bound: another Image Generator window is running
+        if getattr(e, "errno", None) in (98, 10048):
+            rprint("\n[#ab333d]Port 8765 is already in use.")
+            rprint("[white]If another Image Generator window is open, use that one instead.")
+            rprint("[white]Otherwise another program is occupying the port, close it and try again.")
+            input("Press any key to exit")
+            raise SystemExit
+        raise
     asyncio.get_event_loop().run_forever()
