@@ -102,12 +102,30 @@ except:
     exit()
 
 
+# Describe the active compute backend for logging
+def backend_name():
+    if torch.cuda.is_available():
+        return "ROCm" if torch.version.hip else "CUDA"
+    if torch.backends.mps.is_available():
+        return "MPS"
+    return "CPU"
+
+
 # Print system info
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name('cuda')}")
+    print(f"Backend: {backend_name()}")
+    print("Device: cuda")
     print(f"VRAM total: {torch.cuda.get_device_properties('cuda').total_memory / (1024 ** 3)}")
+elif torch.backends.mps.is_available():
+    print("GPU: Apple Silicon")
+    print("Backend: MPS")
+    print("Device: mps")
 else:
     print("No GPU could be found")
+    print("Backend: CPU")
+    print("Device: cpu")
+    print("Falling back to CPU mode")
 
 print(f"RAM available {psutil.virtual_memory().available / (1024 ** 3)}")
 
@@ -341,6 +359,29 @@ def get_precision(device, precision):
                 model_precision = torch.bfloat16
                 vae_precision = torch.bfloat16
 
+        # If GPU is AMD / ROCm use fp16 (native on RDNA) with safe fallbacks
+        elif torch.version.hip or "AMD" in gpu_name or "Radeon" in gpu_name:
+            if precision in ("fp16", "fp8"):
+                try:
+                    _ = torch.ones(1, dtype=torch.float16).cuda()
+                    model_precision = torch.float16
+                    vae_precision = torch.float16
+                    # fp8 is only supported on RDNA4; fall back to fp16 otherwise
+                    if precision == "fp8":
+                        try:
+                            _ = torch.ones(1, dtype=torch.float8_e4m3fn).cuda()
+                            model_precision = torch.float8_e4m3fn
+                            vae_precision = torch.bfloat16
+                        except:
+                            precision = "fp16"
+                            model_precision = torch.float16
+                            vae_precision = torch.float16
+                except:
+                    # fp16 is not supported, fallback to fp32
+                    precision = "fp32"
+                    model_precision = torch.float32
+                    vae_precision = torch.float32
+
         # If GPU is not nvidia
         elif not "NVIDIA" in gpu_name:
             precision = "fp32"
@@ -413,6 +454,11 @@ def autocast(device, precision, dtype = torch.float32):
                 else:
                     return torch.autocast("cuda", dtype=dtype, enabled=True)
         else:
+            # AMD / ROCm: autocast with the selected (tested) dtype
+            if torch.version.hip or "AMD" in gpu_name or "Radeon" in gpu_name:
+                if precision == "fp32":
+                    return contextlib.nullcontext()
+                return torch.autocast("cuda", dtype=dtype, enabled=True)
             # Get manual autocast working
             return contextlib.nullcontext()
             
@@ -1221,7 +1267,7 @@ def load_model(modelFileString, config, device, precision, optimized, split = Tr
 
         # Print loading information
         play("iteration.wav")
-        rprint(f"[#c4f129]Loaded model to [#48a971]{device}[#c4f129] with [#48a971]{precision} precision[#c4f129] in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+        rprint(f"[#c4f129]Loaded model to [#48a971]{device} ({backend_name()})[#c4f129] with [#48a971]{precision} precision[#c4f129] in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
         
         if split:
             split_loaded = True
@@ -2660,6 +2706,7 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
     if len(embed[0][0]) == 2:
         # Use the specified precision scope
         load_ella(device, precision)
+    if len(embed[0][0]) == 2 and modelELLA is not None:
         sigmas = get_sigmas_ays(steps)
         clip_weight = math.sqrt(-1 * (adherence-5)) / 2
 
@@ -2723,7 +2770,6 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
 
             text_embed_batch = []
             neg_text_embed_batch = []
-            ts = timestep(sigma)
             for t5_clip_cond_pair in embed[run]:
                 text_embed = t5_clip_cond_pair[1]
                 if uniform_conds:

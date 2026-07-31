@@ -190,7 +190,7 @@ if use_pytorch_cross_attention:
 VAE_DTYPE = torch.float32
 
 try:
-    if is_nvidia():
+    if is_nvidia() or torch.version.hip:
         torch_version = torch.version.__version__
         if int(torch_version[0]) >= 2:
             if (
@@ -199,7 +199,7 @@ try:
                 and use_quad_cross_attention == False
             ):
                 ENABLE_PYTORCH_ATTENTION = True
-            if torch.cuda.is_bf16_supported():
+            if is_nvidia() and torch.cuda.is_bf16_supported():
                 VAE_DTYPE = torch.bfloat16
     if is_intel_xpu():
         if use_split_cross_attention == False and use_quad_cross_attention == False:
