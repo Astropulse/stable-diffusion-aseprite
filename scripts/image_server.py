@@ -4302,7 +4302,12 @@ def api_generate_images(
         data = response.json()
         # data['base64_images'] is a list of base64-encoded image strings
         base64_images = data.get("base64_images", [])
-        remaining_credits = data.get("remaining_credits", "unavailable")
+        # Current API reports a prepaid USD balance; older builds reported credits
+        remaining = data.get("remaining_balance", data.get("remaining_credits"))
+        if isinstance(remaining, (int, float)):
+            remaining_credits = "${:.2f}".format(remaining)
+        else:
+            remaining_credits = "unavailable"
         if base64_images:
             for img_data in base64_images:
                 # Decode the base64 string
@@ -4403,7 +4408,7 @@ def apitxt2img(prompt, style, W, H, seed, total_images, rembg, tile_x, tile_y, p
         })
     play("batch.wav")
     rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time() - timer, 2)} "
-           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
+           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
     yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 def apiimg2img(prompt, style, W, H, seed, image, strength, total_images, rembg, tile_x, tile_y, preview, api_key, paletteImage = None):
@@ -4492,7 +4497,7 @@ def apiimg2img(prompt, style, W, H, seed, image, strength, total_images, rembg, 
         })
     play("batch.wav")
     rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time() - timer, 2)} "
-           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
+           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
     yield ["", {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 
@@ -4573,7 +4578,7 @@ def apitxt2anim(prompt, style, W, H, seed, preview, api_key):
         })
     play("batch.wav")
     rprint(f"[#c4f129]Animation generation completed in [#48a971]{round(time.time() - timer, 2)} "
-           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
+           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
     yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 
@@ -4657,7 +4662,7 @@ def apiimg2anim(prompt, style, W, H, seed, images, preview, api_key):
             "height": x_sample_image.height
         })
     play("batch.wav")
-    rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] credits left")
+    rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
     yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
 
 
