@@ -213,6 +213,45 @@ def load_lora(filename, model):
 
     return lora
 
+# Cache built LoraModules so repeat generations skip the disk load and module
+# construction. Modules hold no references to the main model, and the per-run
+# multiplier is set by the caller, so reuse across generations is safe.
+lora_module_cache = {}
+
+def lora_cache_probe(filename):
+    """Return a cached LoraModule for an encrypted file (keyed by size), or None."""
+    try:
+        size = os.path.getsize(filename)
+    except OSError:
+        return None
+    hit = lora_module_cache.get(filename)
+    if hit is not None and hit[0] == (filename, size):
+        return hit[1]
+    return None
+
+def lora_cache_store(filename, key, lora):
+    if len(lora_module_cache) >= 12:
+        lora_module_cache.pop(next(iter(lora_module_cache)))
+    lora_module_cache[filename] = (key, lora)
+
+def load_lora_cached(filename, model, cache_key=None):
+    """load_lora with reuse. cache_key overrides the default (size, mtime) key
+    for files that get rewritten on disk (encrypted .pxlm modifiers)."""
+    key = cache_key
+    if key is None:
+        try:
+            key = (filename, os.path.getsize(filename), os.path.getmtime(filename))
+        except OSError:
+            key = None
+    if key is not None:
+        hit = lora_module_cache.get(filename)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+    lora = load_lora(filename, model)
+    if key is not None:
+        lora_cache_store(filename, key, lora)
+    return lora
+
 def lora_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.MultiheadAttention]):
     """
     Applies the currently selected set of Loras to the weights of torch layer self.

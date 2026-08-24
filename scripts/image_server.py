@@ -24,6 +24,8 @@ try:
     from optimization.taesd import TAESD
     from lora import (
         apply_lora,
+        load_lora_cached,
+        lora_cache_probe,
         assign_lora_names_to_compvis_modules,
         load_lora,
         register_lora_for_inference,
@@ -122,6 +124,72 @@ system_models = ["quality", "adapter", "crop", "detail", "brightness", "contrast
 
 global sounds
 sounds = False
+
+
+# Describe the active compute backend for logging
+def _terminal_size():
+    # Terminal size with a fallback for redirected/headless stdio, where
+    # os.get_terminal_size() raises OSError on Windows
+    try:
+        return os.get_terminal_size()
+    except (OSError, ValueError):
+        return os.terminal_size((120, 40))
+
+
+def backend_name():
+    if torch.cuda.is_available():
+        return "ROCm" if torch.version.hip else "CUDA"
+    if torch.backends.mps.is_available():
+        return "MPS"
+    return "CPU"
+
+
+# Print system info
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name('cuda')}")
+    print(f"Backend: {backend_name()}")
+    print("Device: cuda")
+elif torch.backends.mps.is_available():
+    print("GPU: Apple Silicon")
+    print("Backend: MPS")
+    print("Device: mps")
+else:
+    print("No GPU could be found")
+    print("Backend: CPU")
+    print("Device: cpu")
+    print("Falling back to CPU mode")
+
+# Performance defaults: TF32 slightly alters float32 math (visually
+# equivalent) and speeds up float32 fallback paths on Ampere and newer
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+def keep_models_resident():
+    # With plenty of VRAM, keep auxiliary models (T5/ELLA) on the GPU between
+    # generations instead of shuffling them to system RAM every run
+    try:
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties("cuda").total_memory >= 11 * (1024 ** 3)
+    except:
+        pass
+    return False
+
+
+def vram_limited_batch_area(maxBatchSize, device):
+    # Cap the total batch area by free VRAM so large batches cannot OOM
+    if "cuda" in device and torch.cuda.is_available():
+        try:
+            free_mem = torch.cuda.mem_get_info()[0]
+            budget = free_mem - 1.5 * (1024 ** 3)
+            est = int(512 * math.sqrt(max(0.25, budget / (1.2 * (1024 ** 3)))))
+            if est < maxBatchSize:
+                rprint(f"[#494b9b]Batch area capped at [#48a971]{est}[#494b9b] (from [#48a971]{maxBatchSize}[#494b9b]) to fit available VRAM")
+                return est
+        except:
+            pass
+    return maxBatchSize
+
 
 expectedVersion = "lite-1.0.0"
 
@@ -291,6 +359,29 @@ def get_precision(device, precision):
                 model_precision = torch.bfloat16
                 vae_precision = torch.bfloat16
 
+        # If GPU is AMD / ROCm use fp16 (native on RDNA) with safe fallbacks
+        elif torch.version.hip or "AMD" in gpu_name or "Radeon" in gpu_name:
+            if precision in ("fp16", "fp8"):
+                try:
+                    _ = torch.ones(1, dtype=torch.float16).cuda()
+                    model_precision = torch.float16
+                    vae_precision = torch.float16
+                    # fp8 is only supported on RDNA4; fall back to fp16 otherwise
+                    if precision == "fp8":
+                        try:
+                            _ = torch.ones(1, dtype=torch.float8_e4m3fn).cuda()
+                            model_precision = torch.float8_e4m3fn
+                            vae_precision = torch.bfloat16
+                        except:
+                            precision = "fp16"
+                            model_precision = torch.float16
+                            vae_precision = torch.float16
+                except:
+                    # fp16 is not supported, fallback to fp32
+                    precision = "fp32"
+                    model_precision = torch.float32
+                    vae_precision = torch.float32
+
         # If GPU is not nvidia
         elif not "NVIDIA" in gpu_name:
             precision = "fp32"
@@ -363,9 +454,14 @@ def autocast(device, precision, dtype = torch.float32):
                 else:
                     return torch.autocast("cuda", dtype=dtype, enabled=True)
         else:
+            # AMD / ROCm: autocast with the selected (tested) dtype
+            if torch.version.hip or "AMD" in gpu_name or "Radeon" in gpu_name:
+                if precision == "fp32":
+                    return contextlib.nullcontext()
+                return torch.autocast("cuda", dtype=dtype, enabled=True)
             # Get manual autocast working
             return contextlib.nullcontext()
-            
+
     if device == "cpu" or device == "mps" or precision == "fp32":
         return contextlib.nullcontext()
     
@@ -433,7 +529,7 @@ def patch_tiling(tilingX, tilingY, model, modelFS, modelTA, modelPV):
 # Print image in console
 def climage(image, alignment, *args):
     # Get console bounds with a small margin - better safe than sorry
-    twidth, theight = (os.get_terminal_size().columns - 1, (os.get_terminal_size().lines - 1) * 2)
+    twidth, theight = (_terminal_size().columns - 1, (_terminal_size().lines - 1) * 2)
 
     # Set up variables
     image = image.convert("RGBA")
@@ -518,7 +614,7 @@ def clbar(iterable, name="", printEnd="\r", position="", unit="it", disable=Fals
         prediction = f" 00:00 < 00:00 "
         prefix = max(len(name), len("100%"), prefixwidth)
         suffix = max(len(speed), len(prediction), suffixwidth)
-        barwidth = os.get_terminal_size().columns - (suffix + prefix + 2)
+        barwidth = _terminal_size().columns - (suffix + prefix + 2)
 
         # Prints the progress bar
         def printProgressBar(iteration, delay):
@@ -743,6 +839,8 @@ def load_T5(device, precision):
 
 def unload_ella(device):
     global modelELLA
+    if keep_models_resident():
+        return
     if device == "cuda" and modelELLA is not None:
         mem = torch.cuda.memory_allocated() / 1e6
         modelELLA.to("cpu")
@@ -753,6 +851,8 @@ def unload_ella(device):
 
 def unload_T5(device, force=False):
     global modelT5
+    if keep_models_resident() and not force:
+        return
     cpuMemoryUnused = psutil.virtual_memory().available / (1024 ** 3)
     if cpuMemoryUnused > 8 and not force:
         if device == "cuda" and modelT5 is not None:
@@ -830,6 +930,15 @@ def load_model(modelFileString, config, device, precision, optimized):
         else:
             modelType = "general"
             rprint(f"Loading custom model from [#48a971]{modelFile}")
+
+        # Automatically enable the low VRAM path on small GPUs
+        if (not optimized) and "cuda" in device and torch.cuda.is_available():
+            try:
+                if torch.cuda.get_device_properties(device).total_memory < 5.5 * (1024 ** 3):
+                    optimized = True
+                    rprint(f"[#494b9b]Low VRAM GPU detected, enabling optimized mode automatically")
+            except:
+                pass
 
         # Determine if turbo mode is enabled
         turbo = True
@@ -925,12 +1034,21 @@ def load_model(modelFileString, config, device, precision, optimized):
 
         assign_lora_names_to_compvis_modules(model, modelCS)
 
+        # Experimental opt-in: compile the UNet (set RD_TORCH_COMPILE=1)
+        if os.environ.get("RD_TORCH_COMPILE") == "1" and "cuda" in device and not optimized:
+            try:
+                model.model1 = torch.compile(model.model1)
+                model.model2 = torch.compile(model.model2)
+                rprint(f"[#494b9b]torch.compile enabled - the first generation will be slow while kernels compile")
+            except Exception:
+                rprint(f"[#e8be27]torch.compile could not be enabled, continuing without it")
+
         modelName = modelFileString
         modelSettings = modelParams
 
         # Print loading information
         play("iteration.wav")
-        rprint(f"[#c4f129]Loaded model to [#48a971]{device}[#c4f129] with [#48a971]{precision} precision[#c4f129] in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
+        rprint(f"[#c4f129]Loaded model to [#48a971]{device} ({backend_name()})[#c4f129] with [#48a971]{precision} precision[#c4f129] in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds")
         
         return sd, modelFileString
 
@@ -1783,6 +1901,7 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
     if len(embed[0][0]) == 2:
         # Use the specified precision scope
         load_ella(device, precision)
+    if len(embed[0][0]) == 2 and modelELLA is not None:
         sigmas = get_sigmas_ays(steps)
         condBatch = batch
         condCount = 0
@@ -1838,7 +1957,6 @@ def t5_to_clip(embed, negative_embed, uniform_conds, steps, runs, batch, total_i
 
             text_embed_batch = []
             neg_text_embed_batch = []
-            ts = timestep(sigma)
             for t5_clip_cond_pair in embed[run]:
                 text_embed = t5_clip_cond_pair[1]
                 if uniform_conds:
@@ -2062,7 +2180,7 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
     # Calculate maximum batch size
     global maxSize
-    maxSize = maxBatchSize
+    maxSize = vram_limited_batch_area(maxBatchSize, device)
     size = math.sqrt(W * H)
     if size >= maxSize or device == "cpu":
         batch = 1
@@ -2134,33 +2252,39 @@ def txt2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
         if loraName != "none":
             # Handle proprietary models
             if os.path.splitext(loraName)[1] == ".pxlm":
-                with open(loraPair["file"], "rb") as enc_file:
-                    encrypted = enc_file.read()
-                    try:
-                        # Assume file is encrypted, decrypt it
-                        decryptedFiles[i] = fernet.decrypt(encrypted)
-                    except:
-                        # Decryption failed, assume not encrypted
-                        decryptedFiles[i] = encrypted
-
-                    with open(loraPair["file"], "wb") as dec_file:
-                        # Write attempted decrypted file
-                        dec_file.write(decryptedFiles[i])
+                cached_lora = lora_cache_probe(loraPair["file"])
+                if cached_lora is not None:
+                    # Cache hit: skip the decrypt + rewrite + re-encrypt cycle
+                    loadedLoras.append(cached_lora)
+                    decryptedFiles[i] = "none"
+                else:
+                    with open(loraPair["file"], "rb") as enc_file:
+                        encrypted = enc_file.read()
                         try:
-                            # Load decrypted
-                            loadedLoras.append(load_lora(loraPair["file"], model))    
+                            # Assume file is encrypted, decrypt it
+                            decryptedFiles[i] = fernet.decrypt(encrypted)
                         except:
-                            # Decrypted file could not be read, revert to unchanged, and return an error
-                            decryptedFiles[i] = "none"
-                            dec_file.write(encrypted)
-                            loadedLoras.append(None)
-                            rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
-                            continue
+                            # Decryption failed, assume not encrypted
+                            decryptedFiles[i] = encrypted
+
+                        with open(loraPair["file"], "wb") as dec_file:
+                            # Write attempted decrypted file
+                            dec_file.write(decryptedFiles[i])
+                            try:
+                                # Load decrypted
+                                loadedLoras.append(load_lora_cached(loraPair["file"], model, cache_key=(loraPair["file"], len(encrypted))))
+                            except:
+                                # Decrypted file could not be read, revert to unchanged, and return an error
+                                decryptedFiles[i] = "none"
+                                dec_file.write(encrypted)
+                                loadedLoras.append(None)
+                                rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
+                                continue
             else:
                 # Add lora to unet
                 try:
                     # Load decrypted file
-                    loadedLoras.append(load_lora(loraPair["file"], model))
+                    loadedLoras.append(load_lora_cached(loraPair["file"], model))
                 except:
                     # File could not be read
                     loadedLoras.append(None)
@@ -2297,7 +2421,7 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
 
     # Calculate maximum batch size
     global maxSize
-    maxSize = maxBatchSize
+    maxSize = vram_limited_batch_area(maxBatchSize, device)
     size = math.sqrt(W * H)
     if size >= maxSize or device == "cpu":
         batch = 1
@@ -2369,33 +2493,39 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
         if loraName != "none":
             # Handle proprietary models
             if os.path.splitext(loraName)[1] == ".pxlm":
-                with open(loraPair["file"], "rb") as enc_file:
-                    encrypted = enc_file.read()
-                    try:
-                        # Assume file is encrypted, decrypt it
-                        decryptedFiles[i] = fernet.decrypt(encrypted)
-                    except:
-                        # Decryption failed, assume not encrypted
-                        decryptedFiles[i] = encrypted
-
-                    with open(loraPair["file"], "wb") as dec_file:
-                        # Write attempted decrypted file
-                        dec_file.write(decryptedFiles[i])
+                cached_lora = lora_cache_probe(loraPair["file"])
+                if cached_lora is not None:
+                    # Cache hit: skip the decrypt + rewrite + re-encrypt cycle
+                    loadedLoras.append(cached_lora)
+                    decryptedFiles[i] = "none"
+                else:
+                    with open(loraPair["file"], "rb") as enc_file:
+                        encrypted = enc_file.read()
                         try:
-                            # Load decrypted file
-                            loadedLoras.append(load_lora(loraPair["file"], model))
+                            # Assume file is encrypted, decrypt it
+                            decryptedFiles[i] = fernet.decrypt(encrypted)
                         except:
-                            # Decrypted file could not be read, revert to unchanged, and return an error
-                            decryptedFiles[i] = "none"
-                            dec_file.write(encrypted)
-                            loadedLoras.append(None)
-                            rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
-                            continue
+                            # Decryption failed, assume not encrypted
+                            decryptedFiles[i] = encrypted
+
+                        with open(loraPair["file"], "wb") as dec_file:
+                            # Write attempted decrypted file
+                            dec_file.write(decryptedFiles[i])
+                            try:
+                                # Load decrypted file
+                                loadedLoras.append(load_lora_cached(loraPair["file"], model, cache_key=(loraPair["file"], len(encrypted))))
+                            except:
+                                # Decrypted file could not be read, revert to unchanged, and return an error
+                                decryptedFiles[i] = "none"
+                                dec_file.write(encrypted)
+                                loadedLoras.append(None)
+                                rprint(f"[#ab333d]Modifier {os.path.splitext(loraName)[0]} could not be loaded, the file may be corrupted")
+                                continue
             else:
                 # Add lora to unet
                 try:
                     # Load decrypted file
-                    loadedLoras.append(load_lora(loraPair["file"], model))
+                    loadedLoras.append(load_lora_cached(loraPair["file"], model))
                 except:
                     # File could not be read
                     loadedLoras.append(None)
@@ -2543,6 +2673,461 @@ def img2img(prompt, negative, use_ella, translate, promptTuning, W, H, pixelSize
         yield ["", {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": data, "negatives": negative_data}}]
 
 
+def palette_from_source(source, paletteURL, palettes):
+    # Check if a palette URL is provided and try to download the palette image
+    paletteImage = None
+    if source != "None":
+        if source == "URL":
+            try:
+                paletteImage = Image.open(BytesIO(requests.get(paletteURL).content)).convert("RGB")
+            except:
+                rprint(f"\n[#ab333d]ERROR: URL {paletteURL} cannot be reached or is not an image\nReverting to Adaptive palette")
+                paletteImage = None
+        elif palettes != []:
+            try:
+                paletteImage = decodeImage(palettes[0]).convert("RGB")
+            except:
+                pass
+
+        # Determine the number of colors based on the palette or user input
+        if paletteImage is not None:
+            numColors = len(paletteImage.getcolors(16777216))
+            if numColors > 256:
+                paletteImage = paletteImage.quantize(colors=256, method=2, kmeans=256, dither=0).convert("RGB")
+
+    return paletteImage
+
+
+def api_generate_images(
+    api_key: str,
+    prompt: str,
+    input_image = None,
+    style: str = "default",
+    width: int = 256,
+    height: int = 256,
+    strength: float = 0.5,
+    seed: int = 0,
+    num_images: int = 1,
+    tile_x: bool = False,
+    tile_y: bool = False,
+    rembg: bool = False,
+    paletteImage = None,
+    return_spritesheet = None
+):
+    # 1. Prepare the request
+    url = "https://api.retrodiffusion.ai/v1/inferences"
+    method = "POST"
+    headers = {
+        "X-RD-Token": api_key,
+    }
+    payload = {
+        "prompt": prompt,
+        "prompt_style": style,
+        "width": width,
+        "height": height,
+        "num_images": num_images,
+        "seed": seed
+    }
+    
+    if input_image is not None:
+        buffered = BytesIO()
+        # It is very important to convert the image to RGB.
+        input_image.convert("RGB").save(buffered, format="PNG")
+        base64_input_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        payload["input_image"] = base64_input_image
+        payload["strength"] = strength
+
+    if tile_x:
+        payload["tile_x"] = True
+    if tile_y:
+        payload["tile_y"] = True
+
+    if paletteImage is not None:
+        buffered = BytesIO()
+        # It is very important to convert the image to RGB.
+        paletteImage.convert("RGB").save(buffered, format="PNG")
+        base64_input_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        payload["input_palette"] = base64_input_image
+    
+    if rembg:
+        payload["remove_bg"] = True
+
+    if return_spritesheet:
+        payload["return_spritesheet"] = True
+
+    # 2. Send the request
+    response = requests.request(method, url, headers=headers, json=payload)
+
+    images = []
+    # 3. Handle response
+    if response.status_code == 200:
+        data = response.json()
+        # data['base64_images'] is a list of base64-encoded image strings
+        base64_images = data.get("base64_images", [])
+        # Current API reports a prepaid USD balance; older builds reported credits
+        remaining = data.get("remaining_balance", data.get("remaining_credits"))
+        if isinstance(remaining, (int, float)):
+            remaining_credits = "${:.2f}".format(remaining)
+        else:
+            remaining_credits = "unavailable"
+        if base64_images:
+            for img_data in base64_images:
+                # Decode the base64 string
+                img_bytes = base64.b64decode(img_data)
+                # Convert to a Pillow Image and append to the list
+                image = Image.open(BytesIO(img_bytes))
+                if return_spritesheet:
+                    resized_image = image.resize((width*4, height*4), Image.NEAREST)
+                else:
+                    resized_image = image.resize((width, height), Image.NEAREST)
+                images.append(resized_image)
+            return images, remaining_credits
+        else:
+            print("No images returned by the API.")
+            return "no_images"
+    else:
+        return str(response.text)
+
+
+def apitxt2img(prompt, style, W, H, seed, total_images, rembg, tile_x, tile_y, preview, api_key, paletteImage = None):
+    timer = time.time()
+
+    # Set the seed for random number generation if not provided
+    if seed is None:
+        seed = randint(0, 1000000)
+
+    rprint(f"\n[#48a971]Retrodiffusion.ai Text to Image[white] generating [#48a971]{total_images}"
+           f"[white] images at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
+    
+    # Call the API and store the complete response
+    for _ in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
+        response = api_generate_images(
+            api_key,
+            prompt,
+            style=style,
+            width=W,
+            height=H,
+            seed=seed,
+            num_images=total_images,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            rembg=rembg,
+            paletteImage=paletteImage
+        )
+
+    # Check the entire response for errors
+    if isinstance(response, str):
+        if "Invalid or missing X-RD-Token" in response:
+            rprint(f"\n[#ab333d]====> Retrodiffusion.ai API key provided is not valid. <====\nA correct key will be formatted like: rdpk-....")
+        else:
+            rprint(f"\n[#ab333d]ERROR: {response}")
+        yield [{"action": "error"}]
+        return
+
+    if not isinstance(response, (list, tuple)) or len(response) < 1:
+        rprint(f"\n[#ab333d]ERROR: Unexpected API response format")
+        yield [{"action": "error"}]
+        return
+
+    # Split the response into generated images and remaining credits if available
+    generated_images = response[0]
+    remaining_credits = response[1] if len(response) > 1 else None
+
+    # Process preview if enabled
+    if preview:
+        message = [{"action": "display_title", "type": "txt2img", "value": {"text": "Generating..."}}]
+        displayOut = []
+        for i in range(total_images):
+            x_sample_image = generated_images[i]
+            name = str(seed + i)
+            displayOut.append({
+                "name": name,
+                "seed": seed + i,
+                "format": "bytes",
+                "image": encodeImage(x_sample_image, "bytes"),
+                "width": x_sample_image.width,
+                "height": x_sample_image.height
+            })
+        message.append({
+            "action": "display_image",
+            "type": "txt2img",
+            "value": {"images": displayOut, "prompts": prompt, "negatives": ""}
+        })
+        yield message
+
+    # Process final image generation for output
+    final = []
+    for i in range(total_images):
+        x_sample_image = generated_images[i]
+        name = str(hash(str([prompt, style, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
+        final.append({
+            "name": name,
+            "seed": seed + i,
+            "format": "bytes",
+            "image": encodeImage(x_sample_image, "bytes"),
+            "width": x_sample_image.width,
+            "height": x_sample_image.height
+        })
+    play("batch.wav")
+    rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time() - timer, 2)} "
+           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
+    yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
+
+def apiimg2img(prompt, style, W, H, seed, image, strength, total_images, rembg, tile_x, tile_y, preview, api_key, paletteImage = None):
+    timer = time.time()
+
+    # Set the seed for random number generation if not provided
+    if seed is None:
+        seed = randint(0, 1000000)
+
+    init_img = decodeImage(image[0])
+    strength = strength / 100
+
+    rprint(f"\n[#48a971]Retrodiffusion.ai Image to Image[white] generating [#48a971]{total_images}"
+           f"[white] images at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
+    
+    # Call the API and store the complete response
+    for _ in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
+        response = api_generate_images(
+            api_key,
+            prompt,
+            style=style,
+            width=W,
+            height=H,
+            seed=seed,
+            num_images=total_images,
+            input_image=init_img,
+            strength=strength,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            rembg=rembg,
+            paletteImage=paletteImage
+        )
+
+    # Check the entire response for errors
+    if isinstance(response, str):
+        if "Invalid or missing X-RD-Token" in response:
+            rprint(f"\n[#ab333d]====> Retrodiffusion.ai API key provided is not valid. <====\nA correct key will be formatted like: rdpk-....")
+        else:
+            rprint(f"\n[#ab333d]ERROR: {response}")
+        yield [{"action": "error"}]
+        return
+
+    if not isinstance(response, (list, tuple)) or len(response) < 1:
+        rprint(f"\n[#ab333d]ERROR: Unexpected API response format")
+        yield [{"action": "error"}]
+        return
+
+    # Split the response into generated images and remaining credits if available
+    generated_images = response[0]
+    remaining_credits = response[1] if len(response) > 1 else None
+
+    # Process preview if enabled
+    if preview:
+        message = [{"action": "display_title", "type": "img2img", "value": {"text": "Generating..."}}]
+        displayOut = []
+        for i in range(total_images):
+            x_sample_image = generated_images[i]
+            name = str(seed + i)
+            displayOut.append({
+                "name": name,
+                "seed": seed + i,
+                "format": "bytes",
+                "image": encodeImage(x_sample_image, "bytes"),
+                "width": x_sample_image.width,
+                "height": x_sample_image.height
+            })
+        message.append({
+            "action": "display_image",
+            "type": "img2img",
+            "value": {"images": displayOut, "prompts": prompt, "negatives": ""}
+        })
+        yield message
+
+    # Process final image generation for output
+    final = []
+    for i in range(total_images):
+        x_sample_image = generated_images[i]
+        name = str(hash(str([prompt, style, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
+        final.append({
+            "name": name,
+            "seed": seed + i,
+            "format": "bytes",
+            "image": encodeImage(x_sample_image, "bytes"),
+            "width": x_sample_image.width,
+            "height": x_sample_image.height
+        })
+    play("batch.wav")
+    rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time() - timer, 2)} "
+           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
+    yield ["", {"action": "display_image", "type": "img2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
+
+
+def apitxt2anim(prompt, style, W, H, seed, preview, api_key):
+    total_images = 1
+    timer = time.time()
+
+    # Set the seed for random number generation if not provided
+    if seed is None:
+        seed = randint(0, 1000000)
+
+    rprint(f"\n[#48a971]Retrodiffusion.ai Text to Animation[white] generating at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
+    
+    # Call the API and store the complete response
+    for _ in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
+        response = api_generate_images(
+            api_key,
+            prompt,
+            style=style,
+            width=W,
+            height=H,
+            seed=seed,
+            return_spritesheet=True
+        )
+
+    # Check the entire response for errors
+    if isinstance(response, str):
+        if "Invalid or missing X-RD-Token" in response:
+            rprint(f"\n[#ab333d]====> Retrodiffusion.ai API key provided is not valid. <====\nA correct key will be formatted like: rdpk-....")
+        else:
+            rprint(f"\n[#ab333d]ERROR: {response}")
+        yield [{"action": "error"}]
+        return
+
+    if not isinstance(response, (list, tuple)) or len(response) < 1:
+        rprint(f"\n[#ab333d]ERROR: Unexpected API response format")
+        yield [{"action": "error"}]
+        return
+
+    # Split the response into generated images and remaining credits if available
+    generated_images = response[0]
+    remaining_credits = response[1] if len(response) > 1 else None
+
+    # Process preview if enabled
+    if preview:
+        message = [{"action": "display_title", "type": "txt2img", "value": {"text": "Generating..."}}]
+        displayOut = []
+        for i in range(total_images):
+            x_sample_image = generated_images[i]
+            name = str(seed + i)
+            displayOut.append({
+                "name": name,
+                "seed": seed + i,
+                "format": "bytes",
+                "image": encodeImage(x_sample_image, "bytes"),
+                "width": x_sample_image.width,
+                "height": x_sample_image.height
+            })
+        message.append({
+            "action": "display_image",
+            "type": "txt2img",
+            "value": {"images": displayOut, "prompts": prompt, "negatives": ""}
+        })
+        yield message
+
+    # Process final image generation for output
+    final = []
+    for i in range(total_images):
+        x_sample_image = generated_images[i]
+        name = str(hash(str([prompt, style, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
+        final.append({
+            "name": name,
+            "seed": seed + i,
+            "format": "bytes",
+            "image": encodeImage(x_sample_image, "bytes"),
+            "width": x_sample_image.width,
+            "height": x_sample_image.height
+        })
+    play("batch.wav")
+    rprint(f"[#c4f129]Animation generation completed in [#48a971]{round(time.time() - timer, 2)} "
+           f"[#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
+    yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
+
+
+def apiimg2anim(prompt, style, W, H, seed, images, preview, api_key):
+    total_images = 1
+    timer = time.time()
+
+    # Set the seed for random number generation if not provided
+    if seed is None:
+        seed = randint(0, 1000000)
+
+    # Decode the initial image from the provided input list
+    init_img = decodeImage(images[0])
+
+    rprint(f"\n[#48a971]Retrodiffusion.ai Image to Animation[white] generating at [#48a971]{W}[white]x[#48a971]{H}[white] pixels with [#494b9b]{style}[white] style")
+
+    # Make the API call
+    for _ in clbar(range(1), name="Requests", position="", unit="response", prefixwidth=12, suffixwidth=28):
+        response = api_generate_images(
+            api_key,
+            prompt,
+            style=style,
+            input_image=init_img,
+            width=W,
+            height=H,
+            seed=seed,
+            return_spritesheet=True
+        )
+
+    # Check the entire response for errors
+    if isinstance(response, str):
+        if "Invalid or missing X-RD-Token" in response:
+            rprint(f"\n[#ab333d]====> Retrodiffusion.ai API key provided is not valid. <====\nA correct key will be formatted like: rdpk-....")
+        else:
+            rprint(f"\n[#ab333d]ERROR: {response}")
+        yield [{"action": "error"}]
+        return
+
+    if not isinstance(response, (list, tuple)) or len(response) < 1:
+        rprint(f"\n[#ab333d]ERROR: Unexpected API response format")
+        yield [{"action": "error"}]
+        return
+
+    # Split the response into the image result and remaining credits if available
+    generated_images = response[0]
+    remaining_credits = response[1] if len(response) > 1 else None
+
+    # Process preview if enabled
+    if preview:
+        message = [{"action": "display_title", "type": "txt2img", "value": {"text": "Generating..."}}]
+        displayOut = []
+        for i in range(total_images):
+            x_sample_image = generated_images[i]
+            name = str(seed + i)
+            displayOut.append({
+                "name": name,
+                "seed": seed + i,
+                "format": "bytes",
+                "image": encodeImage(x_sample_image, "bytes"),
+                "width": x_sample_image.width,
+                "height": x_sample_image.height
+            })
+        message.append({
+            "action": "display_image",
+            "type": "txt2img",
+            "value": {"images": displayOut, "prompts": prompt, "negatives": ""}
+        })
+        yield message
+
+    # Process final image generation for output
+    final = []
+    for i in range(total_images):
+        x_sample_image = generated_images[i]
+        name = str(hash(str([prompt, style, W, H, seed + i])) & 0x7FFFFFFFFFFFFFFF)
+        final.append({
+            "name": name,
+            "seed": seed + i,
+            "format": "bytes",
+            "image": encodeImage(x_sample_image, "bytes"),
+            "width": x_sample_image.width,
+            "height": x_sample_image.height
+        })
+    play("batch.wav")
+    rprint(f"[#c4f129]Image generation completed in [#48a971]{round(time.time()-timer, 2)} [#c4f129]seconds\n[white]You have [#48a971]{remaining_credits}[white] remaining")
+    yield ["", {"action": "display_image", "type": "txt2img", "value": {"images": final, "prompts": prompt, "negatives": ""}}]
+
+
 async def server(websocket):
     background = False
     try:
@@ -2606,7 +3191,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "txt2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size")
                             else:
@@ -2669,7 +3254,7 @@ async def server(websocket):
                             await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
                         except Exception as e:
                             if "SSLCertVerificationError" in traceback.format_exc():
-                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\ Certificates.command' in a new terminal")
+                                rprint(f"\n[#ab333d]ERROR: Latent Diffusion Model download failed due to SSL certificate error. Please run 'open /Applications/Python*/Install\\ Certificates.command' in a new terminal")
                             elif ("torch.cuda.OutOfMemoryError" in traceback.format_exc()):
                                 rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources. If you are running other GPU heavy programs try closing them. Also try lowering the image generation size or maximum batch size. If samples are at 100%, this was caused by the VAE running out of memory, try enabling the Fast Pixel Decoder")
                             #elif ("Expected batch_size > 0 to be true" in traceback.format_exc()):
@@ -2678,6 +3263,151 @@ async def server(websocket):
                             #    rprint(f"\n[#ab333d]ERROR: Generation failed due to insufficient GPU resources during image encoding. Please lower the maximum batch size, or use a smaller input image")
                             else:
                                 rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "apitxt2img":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+
+                            paletteImage = palette_from_source(
+                                values["source"],
+                                values["url"],
+                                values["palettes"]
+                            )
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "txt2img", "value": {"text": "Generating..."}}))
+                            for result in apitxt2img(
+                                values["prompt"],
+                                values["style"],
+                                values["width"],
+                                values["height"],
+                                values["seed"],
+                                values["generations"],
+                                values["rembg"],
+                                values["tile_x"],
+                                values["tile_y"],
+                                values["send_progress"],
+                                values["api_key"],
+                                paletteImage=paletteImage
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "apiimg2img":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+
+                            paletteImage = palette_from_source(
+                                values["source"],
+                                values["url"],
+                                values["palettes"]
+                            )
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generating..."}}))
+                            for result in apiimg2img(
+                                values["prompt"],
+                                values["style"],
+                                values["width"],
+                                values["height"],
+                                values["seed"],
+                                values["image"],
+                                values["strength"],
+                                values["generations"],
+                                values["rembg"],
+                                values["tile_x"],
+                                values["tile_y"],
+                                values["send_progress"],
+                                values["api_key"],
+                                paletteImage=paletteImage
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "img2img", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "apitxt2anim":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "txt2img", "value": {"text": "Generating..."}}))
+                            for result in apitxt2anim(
+                                values["prompt"],
+                                values["style"],
+                                values["width"],
+                                values["height"],
+                                values["seed"],
+                                values["send_progress"],
+                                values["api_key"]
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "txt2anim", "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "txt2anim", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
+                            play("error.wav")
+                            await websocket.send(json.dumps({"action": "error"}))
+                    case "apiimg2anim":
+                        try:
+                            # Extract parameters from the message
+                            values = message["value"]
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "img2img", "value": {"text": "Generating..."}}))
+                            for result in apiimg2anim(
+                                values["prompt"],
+                                values["style"],
+                                values["width"],
+                                values["height"],
+                                values["seed"],
+                                values["image"],
+                                values["send_progress"],
+                                values["api_key"]
+                            ):
+                                if values["send_progress"]:
+                                    await websocket.send(json.dumps(result[0]))
+                                    if len(result) >= 2:
+                                        await websocket.send(json.dumps(result[1]))
+                                
+                                await websocket.send(json.dumps({"action": "ping"}))
+
+                            if values["send_progress"]:
+                                await websocket.send(json.dumps({"action": "display_title", "type": "txt2anim", "value": {"text": "Generation complete"}}))
+                            await websocket.send(json.dumps({"action": "returning", "type": "txt2anim", "value": {"images": result[1]["value"]["images"]}}))
+                        except Exception as e:
+                            rprint(f"\n[#ab333d]ERROR:\n{traceback.format_exc()}")
                             play("error.wav")
                             await websocket.send(json.dumps({"action": "error"}))
                     case "palettize":
@@ -2817,5 +3547,15 @@ timeout = 1
 # Run the server until it is completed
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    asyncio.get_event_loop().run_until_complete(start_server)
+    try:
+        asyncio.get_event_loop().run_until_complete(start_server)
+    except OSError as e:
+        # Port already bound: another Image Generator window is running
+        if getattr(e, "errno", None) in (98, 10048):
+            rprint("\n[#ab333d]Port 8765 is already in use.")
+            rprint("[white]If another Image Generator window is open, use that one instead.")
+            rprint("[white]Otherwise another program is occupying the port, close it and try again.")
+            input("Press any key to exit")
+            raise SystemExit
+        raise
     asyncio.get_event_loop().run_forever()

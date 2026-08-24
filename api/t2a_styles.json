@@ -1,0 +1,102 @@
+{
+	"rd_animation": [
+		{
+			"name": "Four Angle Walking",
+			"tag": "rd_animation__four_angle_walking",
+			"min_size": 48,
+			"max_size": 48
+		},
+		{
+			"name": "Four Angle Walking Idle",
+			"tag": "rd_animation__four_angle_walking_idle",
+			"min_size": 48,
+			"max_size": 48
+		},
+		{
+			"name": "Small Sprites",
+			"tag": "rd_animation__small_sprites",
+			"min_size": 32,
+			"max_size": 32
+		},
+		{
+			"name": "Visual Effects",
+			"tag": "rd_animation__vfx",
+			"min_size": 24,
+			"max_size": 96
+		},
+		{
+			"name": "Battle Sprites",
+			"tag": "rd_animation__battle_sprites",
+			"min_size": 64,
+			"max_size": 64
+		},
+		{
+			"name": "Any Animation",
+			"tag": "rd_animation__any_animation",
+			"min_size": 64,
+			"max_size": 64
+		},
+		{
+			"name": "Big Animation",
+			"tag": "rd_animation__big_animation",
+			"min_size": 128,
+			"max_size": 128
+		},
+		{
+			"name": "8 Direction Rotation",
+			"tag": "rd_animation__8_dir_rotation",
+			"min_size": 80,
+			"max_size": 80
+		}
+	],
+	"rd_advanced_animation": [
+		{
+			"name": "Walking",
+			"tag": "rd_advanced_animation__walking",
+			"min_size": 32,
+			"max_size": 256
+		},
+		{
+			"name": "Idle",
+			"tag": "rd_advanced_animation__idle",
+			"min_size": 32,
+			"max_size": 256
+		},
+		{
+			"name": "Jump",
+			"tag": "rd_advanced_animation__jump",
+			"min_size": 32,
+			"max_size": 256
+		},
+		{
+			"name": "Crouch",
+			"tag": "rd_advanced_animation__crouch",
+			"min_size": 32,
+			"max_size": 256
+		},
+		{
+			"name": "Attack",
+			"tag": "rd_advanced_animation__attack",
+			"min_size": 32,
+			"max_size": 256
+		},
+		{
+			"name": "Destroy",
+			"tag": "rd_advanced_animation__destroy",
+			"min_size": 32,
+			"max_size": 256
+		},
+		{
+			"name": "Custom Action",
+			"tag": "rd_advanced_animation__custom_action",
+			"min_size": 32,
+			"max_size": 256
+		},
+		{
+			"name": "Subtle Motion",
+			"tag": "rd_advanced_animation__subtle_motion",
+			"min_size": 32,
+			"max_size": 256
+		}
+	]
+}

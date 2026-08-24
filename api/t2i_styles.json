@@ -1,0 +1,364 @@
+{
+	"rd_pro": [
+		{
+			"name": "Default",
+			"tag": "rd_pro__default",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Painterly",
+			"tag": "rd_pro__painterly",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Fantasy",
+			"tag": "rd_pro__fantasy",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Horror",
+			"tag": "rd_pro__horror",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Sci-Fi",
+			"tag": "rd_pro__scifi",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Simple",
+			"tag": "rd_pro__simple",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Isometric",
+			"tag": "rd_pro__isometric",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Top Down",
+			"tag": "rd_pro__topdown",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Platformer",
+			"tag": "rd_pro__platformer",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Dungeon Map",
+			"tag": "rd_pro__dungeon_map",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Spritesheet",
+			"tag": "rd_pro__spritesheet",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "FPS Weapon",
+			"tag": "rd_pro__fps_weapon",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Typography",
+			"tag": "rd_pro__typography",
+			"min_size": 64,
+			"max_size": 256
+		},
+		{
+			"name": "Hexagonal Tiles",
+			"tag": "rd_pro__hexagonal_tiles",
+			"min_size": 256,
+			"max_size": 256
+		},
+		{
+			"name": "UI Panel",
+			"tag": "rd_pro__ui_panel",
+			"min_size": 256,
+			"max_size": 256
+		},
+		{
+			"name": "Inventory Items",
+			"tag": "rd_pro__inventory_items",
+			"min_size": 256,
+			"max_size": 256
+		}
+	],
+	"rd_plus": [
+		{
+			"name": "Default",
+			"tag": "rd_plus__default",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Retro",
+			"tag": "rd_plus__retro",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Watercolor",
+			"tag": "rd_plus__watercolor",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Textured",
+			"tag": "rd_plus__textured",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Cartoon",
+			"tag": "rd_plus__cartoon",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "UI Element",
+			"tag": "rd_plus__ui_element",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Item Sheet",
+			"tag": "rd_plus__item_sheet",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Character Turnaround",
+			"tag": "rd_plus__character_turnaround",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Environment",
+			"tag": "rd_plus__environment",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Isometric",
+			"tag": "rd_plus__isometric",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Isometric Asset",
+			"tag": "rd_plus__isometric_asset",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Top Down Map",
+			"tag": "rd_plus__topdown_map",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Top Down",
+			"tag": "rd_plus__topdown_asset",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Classic",
+			"tag": "rd_plus__classic",
+			"min_size": 32,
+			"max_size": 192
+		},
+		{
+			"name": "Skill Icon",
+			"tag": "rd_plus__skill_icon",
+			"min_size": 32,
+			"max_size": 192
+		},
+		{
+			"name": "Low Res",
+			"tag": "rd_plus__low_res",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Minecraft Item",
+			"tag": "rd_plus__mc_item",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Minecraft Texture",
+			"tag": "rd_plus__mc_texture",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Top Down Item",
+			"tag": "rd_plus__topdown_item",
+			"min_size": 16,
+			"max_size": 96
+		}
+	],
+	"rd_fast": [
+		{
+			"name": "Default",
+			"tag": "rd_fast__default",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Simple",
+			"tag": "rd_fast__simple",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Detailed",
+			"tag": "rd_fast__detailed",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Retro",
+			"tag": "rd_fast__retro",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Game Asset",
+			"tag": "rd_fast__game_asset",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Portrait",
+			"tag": "rd_fast__portrait",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Texture",
+			"tag": "rd_fast__texture",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "UI Element",
+			"tag": "rd_fast__ui",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Item Sheet",
+			"tag": "rd_fast__item_sheet",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Character Turnaround",
+			"tag": "rd_fast__character_turnaround",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "1-Bit",
+			"tag": "rd_fast__1_bit",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "No Style",
+			"tag": "rd_fast__no_style",
+			"min_size": 64,
+			"max_size": 384
+		},
+		{
+			"name": "Low Res",
+			"tag": "rd_fast__low_res",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Minecraft Item",
+			"tag": "rd_fast__mc_item",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Minecraft Texture",
+			"tag": "rd_fast__mc_texture",
+			"min_size": 16,
+			"max_size": 128
+		}
+	],
+	"rd_mini": [
+		{
+			"name": "Classic",
+			"tag": "rd_mini__classic",
+			"min_size": 32,
+			"max_size": 192
+		},
+		{
+			"name": "Skill Icon",
+			"tag": "rd_mini__skill_icon",
+			"min_size": 32,
+			"max_size": 192
+		},
+		{
+			"name": "Low Res",
+			"tag": "rd_mini__low_res",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Minecraft Item",
+			"tag": "rd_mini__mc_item",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Minecraft Texture",
+			"tag": "rd_mini__mc_texture",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Top Down Item",
+			"tag": "rd_mini__topdown_item",
+			"min_size": 16,
+			"max_size": 96
+		},
+		{
+			"name": "Fast Low Res",
+			"tag": "rd_mini__fast_low_res",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Fast Minecraft Item",
+			"tag": "rd_mini__fast_mc_item",
+			"min_size": 16,
+			"max_size": 128
+		},
+		{
+			"name": "Fast Minecraft Texture",
+			"tag": "rd_mini__fast_mc_texture",
+			"min_size": 16,
+			"max_size": 128
+		}
+	]
+}
