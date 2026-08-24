@@ -191,7 +191,7 @@ def vram_limited_batch_area(maxBatchSize, device):
     return maxBatchSize
 
 
-expectedVersion = "lite-1.0.0"
+expectedVersion = "lite-1.6.0"
 
 global maxSize
 
