@@ -3,6 +3,21 @@ print("Importing libraries. This may take one or more minutes.")
 try:
     # Import core libraries
     import os, re, time, sys, asyncio, ctypes, math, threading, platform, json, sys, contextlib
+
+    # RDNA1/2-era consumer cards need ROCm's gfx1030 compatibility shim, but
+    # forcing it on newer generations (RDNA3+, e.g. RX 7000/9000) breaks GPU
+    # detection entirely. Apply it only to GPUs that need it, before torch
+    # loads, and never override a value the user has already set.
+    if sys.platform.startswith("linux") and "HSA_OVERRIDE_GFX_VERSION" not in os.environ:
+        try:
+            import subprocess
+            lspci = subprocess.run(["lspci"], capture_output=True, text=True, timeout=10).stdout
+            gpus = " ".join(l for l in lspci.splitlines() if re.search(r"VGA|3D controller|Display controller", l))
+            if re.search(r"Navi\s*(1\d|2\d)\b", gpus):
+                os.environ["HSA_OVERRIDE_GFX_VERSION"] = "10.3.0"
+        except Exception:
+            pass
+
     import torch
     import scipy
     import numpy as np
