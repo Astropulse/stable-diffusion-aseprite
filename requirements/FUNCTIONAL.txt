@@ -1,31 +1,31 @@
-requests==2.30.0
-cryptography
-numpy==1.26.4
-pygetwindow==0.0.9
-websockets==13.1
-scikit-image>=0.22
-albumentations==0.4.3
-opencv-python==4.9.0.80
-opencv-python-headless==4.9.0.80
-pudb==2019.2
-imageio==2.37.4
-imageio-ffmpeg==0.4.2
-pytorch-lightning==2.6.5
-omegaconf==2.1.1
-test-tube>=0.7.5
-streamlit>=0.73.1
-einops==0.3.0
-torch-fidelity==0.3.0
-transformers==4.40.2
-sentencepiece==0.2.0
-quanto==0.1.0
-torchmetrics==1.9.0
-safetensors==0.4.3
-kornia==0.6
-accelerate==0.24.1
-taming-transformers-rom1504==0.0.6
-pandas==2.2.2
-torchsde
-git+https://github.com/Astropulse/hitherdither#egg=hitherdither
-git+https://github.com/openai/CLIP#egg=clip
-git+https://github.com/Astropulse/k-diffusion#egg=k_diffusion
+requests==2.30.0 -c requirements/CONSTRAINTS.txt
+cryptography -c requirements/CONSTRAINTS.txt
+numpy==1.26.4 -c requirements/CONSTRAINTS.txt
+pygetwindow==0.0.9 -c requirements/CONSTRAINTS.txt
+websockets==13.1 -c requirements/CONSTRAINTS.txt
+scikit-image>=0.22 -c requirements/CONSTRAINTS.txt
+albumentations==0.4.3 -c requirements/CONSTRAINTS.txt
+opencv-python==4.9.0.80 -c requirements/CONSTRAINTS.txt
+opencv-python-headless==4.9.0.80 -c requirements/CONSTRAINTS.txt
+pudb==2019.2 -c requirements/CONSTRAINTS.txt
+imageio==2.37.4 -c requirements/CONSTRAINTS.txt
+imageio-ffmpeg==0.4.2 -c requirements/CONSTRAINTS.txt
+pytorch-lightning==2.6.5 -c requirements/CONSTRAINTS.txt
+omegaconf==2.1.1 -c requirements/CONSTRAINTS.txt
+test-tube>=0.7.5 -c requirements/CONSTRAINTS.txt
+streamlit>=0.73.1 -c requirements/CONSTRAINTS.txt
+einops==0.3.0 -c requirements/CONSTRAINTS.txt
+torch-fidelity==0.3.0 -c requirements/CONSTRAINTS.txt
+transformers==4.40.2 -c requirements/CONSTRAINTS.txt
+sentencepiece==0.2.0 -c requirements/CONSTRAINTS.txt
+quanto==0.1.0 -c requirements/CONSTRAINTS.txt
+torchmetrics==1.9.0 -c requirements/CONSTRAINTS.txt
+safetensors==0.4.3 -c requirements/CONSTRAINTS.txt
+kornia==0.6 -c requirements/CONSTRAINTS.txt
+accelerate==0.24.1 -c requirements/CONSTRAINTS.txt
+taming-transformers-rom1504==0.0.6 -c requirements/CONSTRAINTS.txt
+pandas==2.2.2 -c requirements/CONSTRAINTS.txt
+torchsde -c requirements/CONSTRAINTS.txt
+git+https://github.com/Astropulse/hitherdither#egg=hitherdither -c requirements/CONSTRAINTS.txt
+git+https://github.com/openai/CLIP#egg=clip -c requirements/CONSTRAINTS.txt
+git+https://github.com/Astropulse/k-diffusion#egg=k_diffusion -c requirements/CONSTRAINTS.txt

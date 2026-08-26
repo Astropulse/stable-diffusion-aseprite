@@ -1,0 +1,6 @@
+# Version guards applied to every package install (pip -c). Installs run one
+# package at a time, so without these any later package can re-resolve shared
+# dependencies to versions the torch 2.2 / opencv 4.9 era binaries cannot
+# import (numpy 2.x breaks both at startup).
+numpy==1.26.4
+pandas==2.2.2
