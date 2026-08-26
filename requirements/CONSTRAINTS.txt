@@ -1,0 +1,5 @@
+# Version guards applied to every package install (pip -c). Installs run one
+# package at a time, so without these any later package can re-resolve shared
+# dependencies (numpy!) to versions the pinned stack was not built against.
+numpy==2.2.6
+pandas==2.2.2
