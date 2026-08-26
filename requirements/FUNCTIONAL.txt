@@ -1,5 +1,6 @@
 requests==2.30.0
 cryptography
+numpy==1.26.4
 pygetwindow==0.0.9
 websockets==13.1
 scikit-image>=0.22
@@ -23,7 +24,7 @@ safetensors==0.4.3
 kornia==0.6
 accelerate==0.24.1
 taming-transformers-rom1504==0.0.6
-pandas
+pandas==2.2.2
 torchsde
 git+https://github.com/Astropulse/hitherdither#egg=hitherdither
 git+https://github.com/openai/CLIP#egg=clip
